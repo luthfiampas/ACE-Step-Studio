@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { openRouterSettingsChanged, SELF_READ } from '../services/studioQueries';
-import { Check, ChevronDown, Download, FolderDown, FolderOpen, Loader2, Square, Trash2, X } from 'lucide-react';
+import { Check, ChevronDown, Download, Loader2, Square, Trash2, X } from 'lucide-react';
 import { useI18n } from '../context/I18nContext';
 import { RescanButton } from './RescanButton';
 import { UpdatePlanView } from './UpdateScreen';
@@ -94,13 +94,6 @@ type OptionalStatus = {
 };
 
 const bytes = (value: number) => (value < 1024 ** 3 ? `${Math.round(value / 1024 ** 2)} MB` : `${(value / 1024 ** 3).toFixed(1)} GB`);
-
-/** What "use models I already have" took from the chosen folder, and what it left and why. */
-interface AdoptReport {
-  folder: string;
-  adopted: string[];
-  refused: Array<{ file: string; kind: 'size' | 'unknown' | 'copy'; size?: number; needs?: number; repository?: string; revision?: string; error?: string }>;
-}
 
 const errorMessage = async (response: Response) => {
   const body = await response.json().catch(() => null);
@@ -695,7 +688,6 @@ export const SetupGate: React.FC<{ onReady?: () => void; mode?: 'first-run' | 's
   const { t } = useI18n();
   const [status, setStatus] = useState<SetupStatus | null>(null);
   const [catalog, setCatalog] = useState<Catalog | null>(null);
-  const [adoptReport, setAdoptReport] = useState<AdoptReport | null>(null);
   const [updateOpen, setUpdateOpen] = useState(false);
   const [choice, setChoice] = useState<Record<string, string>>({});
   const chosenValues = useMemo(() => Object.values(choice).filter((id): id is string => typeof id === 'string' && id.length > 0), [choice]);
@@ -1050,55 +1042,6 @@ export const SetupGate: React.FC<{ onReady?: () => void; mode?: 'first-run' | 's
                 <p className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">{t('dataFolder')}</p>
                 <p className="mt-1 break-all font-mono text-[11px] text-zinc-600 dark:text-zinc-300">{status.data_directory}</p>
                 {status.portable && <p className="mt-1 text-[11px] leading-4 text-emerald-600 dark:text-emerald-300">{t('portableFolder')}</p>}
-                <button
-                  type="button"
-                  onClick={() => void fetch('/v1/open-data-directory', { method: 'POST' })}
-                  className="mt-2 inline-flex items-center gap-1 rounded-lg border border-zinc-300 px-2 py-1 text-[11px] font-medium text-zinc-600 hover:border-pink-400 hover:text-pink-600 dark:border-white/15 dark:text-zinc-300"
-                >
-                  <FolderOpen size={13} />
-                  {t('openFolder')}
-                </button>
-                {/* Anyone who has run this engine elsewhere already has these files.
-                    Downloading ten gigabytes again to get them is a waste of a
-                    line and a disk. */}
-                <button
-                  type="button"
-                  onClick={() => {
-                    void fetch('/setup/adopt', { method: 'POST' })
-                      .then((response) => (response.ok ? response.json() : null))
-                      .then((body: { picked?: boolean; folder?: string; adopted?: string[]; refused?: AdoptReport['refused'] } | null) => {
-                        if (!body?.picked) return;
-                        setAdoptReport({ folder: body.folder ?? '', adopted: body.adopted ?? [], refused: body.refused ?? [] });
-                        void refresh();
-                      })
-                      .catch(() => undefined);
-                  }}
-                  className="ml-2 mt-2 inline-flex items-center gap-1 rounded-lg border border-zinc-300 px-2 py-1 text-[11px] font-medium text-zinc-600 hover:border-pink-400 hover:text-pink-600 dark:border-white/15 dark:text-zinc-300"
-                >
-                  <FolderDown size={13} />
-                  {t('useExistingModels')}
-                </button>
-                {adoptReport && (
-                  <div className="mt-2 space-y-1 text-[11px] leading-4">
-                    {adoptReport.adopted.length > 0 ? (
-                      <p className="text-emerald-600 dark:text-emerald-300">{t('adoptTaken').replace('{count}', String(adoptReport.adopted.length))}</p>
-                    ) : (
-                      <p className="text-amber-600 dark:text-amber-300">{t('adoptNone').replace('{folder}', adoptReport.folder)}</p>
-                    )}
-                    {adoptReport.refused.map((refusal) => (
-                      <p key={refusal.file} className="break-all text-amber-600 dark:text-amber-300">
-                        <span className="font-mono">{refusal.file}</span> — {refusal.kind === 'size'
-                          ? t('adoptRefusedSize')
-                              .replace('{size}', (refusal.size ?? 0).toLocaleString())
-                              .replace('{needs}', (refusal.needs ?? 0).toLocaleString())
-                              .replace('{source}', `huggingface.co/${refusal.repository ?? ''} @ ${(refusal.revision ?? '').slice(0, 7)}`)
-                          : refusal.kind === 'copy'
-                            ? t('adoptRefusedCopy').replace('{error}', refusal.error ?? '')
-                            : t('adoptRefusedUnknown')}
-                      </p>
-                    ))}
-                  </div>
-                )}
               </div>
             )}
           </div>
@@ -1207,7 +1150,7 @@ export const SetupGate: React.FC<{ onReady?: () => void; mode?: 'first-run' | 's
               settingsUrl="/v1/separation/settings"
               removeUrl="/v1/separation/remove"
               cancelUrl="/v1/separation/runtime/cancel"
-              engines={[{ id: 'htdemucs', label: 'HT-Demucs' }, { id: 'roformer', label: 'Mel-Band RoFormer' }]}
+              engines={[{ id: 'htdemucs', label: 'HT-Demucs' }, { id: 'roformer', label: 'Mel-Band RoFormer' }, { id: 'roformer-sw', label: 'BS-RoFormer SW' }]}
             />
             <OptionalGroup
               title={t('karaokeSection')}

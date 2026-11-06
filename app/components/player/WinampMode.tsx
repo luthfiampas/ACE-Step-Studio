@@ -1,14 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
 import type WebampLazy from 'webamp/lazy';
-import { currentMonitor, getCurrentWindow, LogicalSize, PhysicalPosition, PhysicalSize } from '@tauri-apps/api/window';
-import { getCurrentWebview } from '@tauri-apps/api/webview';
-import { invoke } from '@tauri-apps/api/core';
+// Desktop Tauri imports removed for headless web
 import { useI18n } from '../../context/I18nContext';
 import type { Playlist, Song } from '../../types';
 import { parseDuration } from '../../services/nativeLibrary';
 import { TRACK_ARTIST } from '../../services/studio';
 import { trackCoverUrl } from '../../services/playerPanels';
-import { isDesktop } from '../../services/externalLinks';
 import { EQ_BANDS, equalizer, setEqualizer } from '../../services/audioGraph';
 import { addWinampSkin, pickSkin, registerWinampControl, setWinampSettings, winampSettings, winampSkins, type WinampSkin } from '../../services/winamp';
 import { sharpenSkin, sharpSkinCss, skinScale } from '../../services/winampSharp';
@@ -83,7 +80,7 @@ const SHAPE = `${SELECTOR}, #webamp-context-menu .context-menu, #webamp-context-
 /** A shape with nothing in it: the window is there but shows nothing, until Winamp is drawn. */
 const NOTHING: [number, number, number, number][] = [[0, 0, 0, 0]];
 
-const setShape = (rects: [number, number, number, number][]) => invoke<void>('set_window_region', { rects });
+const setShape = (_rects: [number, number, number, number][]) => Promise.resolve();
 
 /** Winamp's sliders are 0..100 with 50 flat; the studio's are decibels. */
 const toSlider = (db: number) => Math.round(50 + (db / 12) * 50);
@@ -101,44 +98,9 @@ async function milkdropPresets() {
   return (await loadMilkdropPresets()).map(([name, preset]) => ({ name, butterchurnPresetObject: preset }));
 }
 
-type SavedWindow = { position: PhysicalPosition; size: PhysicalSize; maximized: boolean };
-
-/** Where the window's shape before the mode waits, until the mode is left: a reload inside the mode finds it. */
-const SAVED_WINDOW = 'studio:winamp-window';
-
-/** The studio's window as it was before the mode: frame, size, place, maximised, page zoom. */
-async function restoreWindow(win: ReturnType<typeof getCurrentWindow>, saved: SavedWindow) {
-  const steps: [string, () => Promise<void>][] = [
-    ['shape', () => setShape([])],
-    ['always on top', () => win.setAlwaysOnTop(false)],
-    ['frame', () => win.setDecorations(true)],
-    ['resizable', () => win.setResizable(true)],
-    ['minimum size', () => win.setMinSize(new LogicalSize(STUDIO_MIN.width, STUDIO_MIN.height))],
-    ['size', () => win.setSize(saved.size)],
-    ['position', () => win.setPosition(saved.position)],
-    ['maximised', () => (saved.maximized ? win.maximize() : Promise.resolve())],
-    ['page zoom', () => getCurrentWebview().setZoom(1)],
-  ];
-  for (const [what, step] of steps) {
-    try {
-      await step();
-    } catch (error) {
-      console.error(`Leaving Winamp: the window's ${what} did not come back:`, error);
-    }
-  }
-  sessionStorage.removeItem(SAVED_WINDOW);
-}
-
-/** A page that reloaded inside the Winamp mode gives the window its shape back. */
+/** The studio's window as it was before the mode. A browser has no window to restore. */
 export async function restoreWindowAfterReload(): Promise<void> {
-  const text = sessionStorage.getItem(SAVED_WINDOW);
-  if (!text || !isDesktop()) return;
-  const saved = JSON.parse(text) as { x: number; y: number; width: number; height: number; maximized: boolean };
-  await restoreWindow(getCurrentWindow(), {
-    position: new PhysicalPosition(saved.x, saved.y),
-    size: new PhysicalSize(saved.width, saved.height),
-    maximized: saved.maximized,
-  });
+  // No-op in browser
 }
 
 export const WinampMode: React.FC<Props> = ({ queue, startIndex, startSeconds, playing, volume, shuffle, repeat, library, playlists, sourcePlaylistId, onSavePlaylist, onExit }) => {
@@ -165,11 +127,9 @@ export const WinampMode: React.FC<Props> = ({ queue, startIndex, startSeconds, p
   useEffect(() => {
     const node = host.current;
     if (!node) return undefined;
-    const desktop = isDesktop();
-    const win = desktop ? getCurrentWindow() : null;
+    const win = null;
     let webamp: WebampLazy | null = null;
     let disposed = false;
-    let saved: SavedWindow | null = null;
     const cleanups: (() => void)[] = [];
     const songById = (id: unknown) => libraryRef.current.find((entry) => entry.id === id) ?? queue.find((entry) => entry.id === id);
     const idOf = (url: string) => (libraryRef.current.find((entry) => entry.audioUrl === url) ?? queue.find((entry) => entry.audioUrl === url))?.id ?? null;
@@ -203,7 +163,7 @@ export const WinampMode: React.FC<Props> = ({ queue, startIndex, startSeconds, p
     let zoom = 1;
     const setZoom = async (next: number) => {
       zoom = next;
-      if (desktop) await onWindow(() => getCurrentWebview().setZoom(next));
+      // zoom managed in browser
       reshape();
     };
 
@@ -366,59 +326,10 @@ export const WinampMode: React.FC<Props> = ({ queue, startIndex, startSeconds, p
         cleanups.push(() => stopWaiting?.());
       }
 
-      // the window spreads over the screen's work area, shown as nothing until Winamp is drawn;
-      // Winamp opens where the studio's window stood
-      let target: { x: number; y: number; width: number; height: number } | null = null;
-      if (win) {
-        await onWindow(async () => {
-          if (disposed) return;
-          saved = { position: await win.outerPosition(), size: await win.innerSize(), maximized: await win.isMaximized() };
-          sessionStorage.setItem(SAVED_WINDOW, JSON.stringify({ x: saved.position.x, y: saved.position.y, width: saved.size.width, height: saved.size.height, maximized: saved.maximized }));
-          const monitor = await currentMonitor();
-          if (!monitor) throw new Error('the screen under the window is not known');
-          await setShape(NOTHING);
-          lastShape = JSON.stringify(NOTHING);
-          if (saved.maximized) await win.unmaximize();
-          await win.setMinSize(null);
-          await win.setDecorations(false);
-          await win.setResizable(false);
-          await win.setAlwaysOnTop(settings.alwaysOnTop);
-          const area = monitor.workArea;
-          await win.setSize(new PhysicalSize(area.size.width, area.size.height));
-          // the page, not the invisible border a frameless window keeps around it, lies on the work area
-          const page = await win.innerPosition();
-          const outer = await win.outerPosition();
-          await win.setPosition(new PhysicalPosition(area.position.x - (page.x - outer.x), area.position.y - (page.y - outer.y)));
-          zoom = settings.scale;
-          await getCurrentWebview().setZoom(zoom);
-          const pixels = monitor.scaleFactor * zoom;
-          target = {
-            x: (saved.position.x - area.position.x) / pixels,
-            y: (saved.position.y - area.position.y) / pixels,
-            width: area.size.width / pixels,
-            height: area.size.height / pixels,
-          };
-        });
-      }
       if (disposed) return;
       await webamp.renderInto(node);
       if (disposed) return;
-      if (target) {
-        const place = target as { x: number; y: number; width: number; height: number };
-        const boxes = [...node.querySelectorAll<HTMLElement>(SELECTOR)].map((element) => element.getBoundingClientRect()).filter((box) => box.width > 0 && box.height > 0);
-        if (boxes.length) {
-          const left = Math.min(...boxes.map((box) => box.left));
-          const top = Math.min(...boxes.map((box) => box.top));
-          const width = Math.max(...boxes.map((box) => box.right)) - left;
-          const height = Math.max(...boxes.map((box) => box.bottom)) - top;
-          const dx = Math.round(Math.max(0, Math.min(place.x, place.width - width)) - left);
-          const dy = Math.round(Math.max(0, Math.min(place.y, place.height - height)) - top);
-          const windows = store().getState().windows.genWindows;
-          store().dispatch({ type: 'UPDATE_WINDOW_POSITIONS', positions: Object.fromEntries(Object.entries(windows).map(([id, info]) => [id, { x: info.position.x + dx, y: info.position.y + dy }])), absolute: true });
-        }
-      } else {
-        await setZoom(settings.scale);
-      }
+      await setZoom(settings.scale);
 
       // the studio's equalizer, volume and balance carry over
       const eq = equalizer();
@@ -619,10 +530,6 @@ export const WinampMode: React.FC<Props> = ({ queue, startIndex, startSeconds, p
 
     return () => {
       disposed = true;
-      // queued after the setup and any new shape, so the window's shape back is the last thing it gets
-      if (win) void onWindow(async () => {
-        if (saved) await restoreWindow(win, saved);
-      });
       cleanups.forEach((cleanup) => cleanup());
       try {
         webamp?.pause();

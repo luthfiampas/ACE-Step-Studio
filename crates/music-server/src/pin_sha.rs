@@ -36,6 +36,7 @@ const PINNED: &[(&str, &str)] = &[
     ("https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-9.25.0.15_cuda12-archive.zip", "06e94f70c52d7335b7ed8044eed28ce963b7fd59d8c2c446ffc60e695fccad91"),
     ("https://files.pythonhosted.org/packages/20/e2/fc9a0e985249d873150276d5afb02e39a66817fedbf1a385724393e505ed/nvidia_cublas_cu12-12.9.2.10-py3-none-win_amd64.whl", "623f43027d40d44ceadf0043f002bd25cf353e8f13ce90b9a87057019f560661"),
     ("https://files.pythonhosted.org/packages/cb/c0/0a517bfe63ccd3b92eb254d264e28fca3c7cab75d07daea315250fb1bf73/nvidia_cublas_cu12-12.9.2.10-py3-none-manylinux_2_27_x86_64.whl", "e4f53a8ca8c5d6e8c492d0d0a3d565ecb59a751b19cfdaa4f6da0ab2104c1702"),
+    ("https://github.com/chenmozhijin/BSRoformer.cpp/releases/download/v0.1.0/BSRoformer-linux-cuda-12.9.1.tar.xz", "448289d5162062ebd2fb7af3c1a1d88297438aef15b0e8369f6b101e82b4983c"),
     ("https://github.com/timoncool/BSRoformer.cpp/releases/download/studio-0.1.1/BSRoformer-linux-cuda13-x64.tar.gz", "807f59113f17eb706bc7289155bdf507d05ae01650a5c2ccd9685f5574e9cd04"),
     ("https://github.com/timoncool/BSRoformer.cpp/releases/download/studio-0.1.1/BSRoformer-linux-cpu-x64.tar.gz", "65eb3cf26dfed0a23f01906a9f179ae7ab503f2bdac4f411e49ec902a5addafd"),
     ("https://github.com/chenmozhijin/BSRoformer.cpp/releases/download/v0.1.0/BSRoformer-macos-arm64.tar.xz", "d0fc45181d31dcceea99c3828378f4a7376e52e7fdbc43e29a07e806785b4c9a"),
@@ -63,6 +64,7 @@ const PINNED: &[(&str, &str)] = &[
     ("https://github.com/timoncool/YuE2-Studio/releases/download/hotstep-tools-ee7286d1/hotstep-tools-cuda-windows-x64.zip", "d4a9a08b796fd20e308448e1eb9faa77565ae59251b9885038785ef979eb36b3"),
     ("https://huggingface.co/StemSplitio/htdemucs-6s-onnx/resolve/49df9b6989cf2150840ea65b0bef77a2e471b678/htdemucs_6s_fp16weights.onnx", "7ce55792e2231c93fbf92de95f5fd5b3a5e6c89f7db690dfd693e8f1dce56869"),
     ("https://huggingface.co/chenmozhijin/BSRoformer-GGUF/resolve/df802a6773d25ba6ef785ff619daa3e510503168/GaboxR67/MelBandRoformers/melbandroformers/vocals/voc_fv6-Q8_0.gguf", "2cd84c9f24513749b0cb1a6ab3e3be5c5e2f7d0e8533e50512c1f394d2828a73"),
+    ("https://huggingface.co/studio409/BSRoformer-SW-6Stem-GGUF/resolve/fcb2eb0f60cb1135a4cdffe6c40de43c53ee07a9/bs_roformer_sw_6stem-F16.gguf", "f4bb0d024db4cbb1d38c043652f7277d830e25babafcf013403ee7344641a82a"),
     ("https://huggingface.co/google/gemma-4-12B-it-qat-q4_0-gguf/resolve/29d097773436b69ff9feafd636ab4cf873786537/gemma-4-12b-it-qat-q4_0.gguf", "93567e57a8fe10b23569b9d9ec38cd005deedf71e29477c421a4b83f418a538b"),
     ("https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf/resolve/4b4a2c1d584be7264f87aac328a1bc739ce81b6c/gemma-4-E4B_q4_0-it.gguf", "676c35070db6dbe52f93e9c864ee0fba4eddea94b9c875d9cb10daff453fbaee"),
     ("https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/fc034cfff751157913579611efad8462ac1be606/gemma-4-12b-it-Q5_K_M.gguf", "32c554c7d1338a23837ae39b3db482213a4a642f96df3b2619f516a2375d16cd"),
@@ -156,7 +158,11 @@ mod tests {
         urls.extend(crate::lyrics_sync::ASSETS.iter().map(|asset| asset.url));
         urls.extend(crate::engine_runtime::ASSETS.iter().map(|asset| asset.url));
         urls.extend(crate::assistant_runtime::ASSETS.iter().map(|asset| asset.url));
-        urls.extend([crate::separation::MODEL.url, crate::separation::ROFORMER_MODEL.url]);
+        urls.extend([
+            crate::separation::MODEL.url,
+            crate::separation::ROFORMER_MODEL.url,
+            crate::separation::ROFORMER_SW_MODEL.url,
+        ]);
         urls.extend([true, false].into_iter().filter_map(crate::separation::Separator::roformer_engine).map(|asset| asset.url));
         let missing: Vec<&str> = urls.into_iter().filter(|url| sha256(url).is_none()).collect();
         assert!(missing.is_empty(), "pins without a SHA-256: {missing:#?}");

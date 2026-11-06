@@ -166,7 +166,6 @@ export function importDataset(files: File[]): Promise<Dataset> {
   return call<Dataset>('/v1/training/datasets/import', { method: 'POST', body: form });
 }
 
-export const revealDataset = (id: string) => call<void>(`/v1/training/datasets/${id}/reveal`, { method: 'POST' });
 
 export const updateItem = (id: string, item: string, patch: Partial<Pick<DatasetItem, 'title' | 'artist' | 'style' | 'lyrics' | 'instrumental'>>) =>
   call<Dataset>(`/v1/training/datasets/${id}/items/${item}`, json('PATCH', patch));

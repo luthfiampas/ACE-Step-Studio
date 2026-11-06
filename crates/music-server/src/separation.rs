@@ -47,6 +47,9 @@ pub enum Engine {
     #[default]
     Htdemucs,
     Roformer,
+    /// BS-RoFormer SW on the same engine build: six sources from one mask.
+    #[serde(rename = "roformer-sw")]
+    RoformerSw,
 }
 
 impl Default for SeparationConfig {
@@ -96,6 +99,28 @@ pub const MODEL: Asset = Asset {
 
 /// The stems Mel-Band RoFormer leaves: the voice, and the mix without it.
 pub const ROFORMER_STEMS: [&str; 2] = ["vocals", "instrumental"];
+
+/// BS-RoFormer SW, six sources from one mask, through the same engine build.
+/// The order is the one its training config lists (`instruments`) and the CLI
+/// names its files only `stem_0` to `stem_5`, so this order is what maps them.
+pub const ROFORMER_SW_STEMS: [&str; 6] = ["bass", "drums", "other", "vocals", "guitar", "piano"];
+
+/// BS-RoFormer SW in GGUF, converted from the ONNX export of the checkpoint
+/// `jarredou/BS-ROFO-SW-Fixed` (that account is gone; `FractalSurfer` and
+/// `enerjazzer` mirror the weights, which carry no licence).
+pub const ROFORMER_SW_MODEL: Asset = Asset {
+    id: "roformer-sw",
+    label: "BS-RoFormer SW (6 stems)",
+    kind: AssetKind::Model,
+    url: "https://huggingface.co/studio409/BSRoformer-SW-6Stem-GGUF/resolve/fcb2eb0f60cb1135a4cdffe6c40de43c53ee07a9/bs_roformer_sw_6stem-F16.gguf",
+    relative_path: "models/bsroformer/sw-6stem-f16.gguf",
+    bytes: 350_443_040,
+    unzip_into: None,
+    marker: "",
+    pick: &[],
+    vram_gb: None,
+    note: "Six stems: bass, drums, other, vocals, guitar and piano. The same engine as Mel-Band RoFormer, cleaner than HT-Demucs.",
+};
 
 /// Mel-Band RoFormer voc_fv6 (GaboxR67) in GGUF Q8_0, as Dub Studio separates with it.
 pub const ROFORMER_MODEL: Asset = Asset {
@@ -147,14 +172,14 @@ pub const ROFORMER_ENGINE: Asset = Asset {
     id: "bsroformer-engine",
     label: "BSRoformer.cpp (CUDA)",
     kind: AssetKind::Runtime,
-    url: "https://github.com/timoncool/BSRoformer.cpp/releases/download/studio-0.1.1/BSRoformer-linux-cuda13-x64.tar.gz",
-    relative_path: "bsroformer-cuda.tar.gz",
-    bytes: 123_464_218,
+    url: "https://github.com/chenmozhijin/BSRoformer.cpp/releases/download/v0.1.0/BSRoformer-linux-cuda-12.9.1.tar.xz",
+    relative_path: "bsroformer-cuda.tar.xz",
+    bytes: 237_738_556,
     unzip_into: Some("bsroformer"),
     marker: "bs_roformer-cli",
     pick: &[],
     vram_gb: None,
-    note: "Runs Mel-Band RoFormer on an NVIDIA card.",
+    note: "Runs Mel-Band RoFormer on an NVIDIA card with CUDA 12.",
 };
 #[cfg(target_os = "linux")]
 pub const ROFORMER_ENGINE_CPU: Asset = Asset {
@@ -248,6 +273,18 @@ impl Separator {
             && (!gpu || self.cuda_libraries_found())
     }
 
+    pub fn roformer_sw_path(&self) -> PathBuf {
+        self.downloader.path_of(&ROFORMER_SW_MODEL)
+    }
+
+    /// BS-RoFormer SW can run: its own model on the same engine build, and for
+    /// the card the cuBLAS that build loads.
+    pub fn roformer_sw_installed(&self, gpu: bool) -> bool {
+        self.downloader.is_installed(&ROFORMER_SW_MODEL)
+            && Self::roformer_engine(gpu).is_some_and(|engine| self.downloader.is_installed(engine))
+            && (!gpu || self.cuda_libraries_found())
+    }
+
     /// The CUDA build's cuBLAS 13 where the Windows loader looks: beside the program, or on PATH.
     fn cuda_libraries_found(&self) -> bool {
         if !cfg!(windows) {
@@ -289,6 +326,68 @@ impl Separator {
         let separated = dub_sep::separate(&mix, &work.path().join("stems"), &cli, &self.downloader.path_of(&ROFORMER_MODEL))
             .map_err(|error| anyhow::anyhow!("Mel-Band RoFormer: {error}"))?;
         Ok((crate::audio_pcm::decode_stereo_44k(&separated.vocals)?, crate::audio_pcm::decode_stereo_44k(&separated.instrumental)?))
+    }
+
+    /// The six sources of `ROFORMER_SW_STEMS`, of interleaved 44.1 kHz stereo.
+    ///
+    /// The CLI takes the mix and a path to write, chunks and overlaps the audio
+    /// itself, and leaves one file per source beside that path. It is run with
+    /// its own folder as cwd and first on the library path: without that it
+    /// loads the music engine's libggml instead of its own.
+    pub fn separate_roformer_sw(&self, samples: &[f32], gpu: bool) -> Result<Separated> {
+        if samples.is_empty() {
+            bail!("nothing to separate: the track decoded to no audio");
+        }
+        let cli = self.roformer_cli(gpu).context("BS-RoFormer SW has no build for this platform")?;
+        let work = tempfile::tempdir()?;
+        let mix = work.path().join("mix.wav");
+        let stereo = audio_post::Stereo {
+            rate: SAMPLE_RATE,
+            left: samples.iter().step_by(CHANNELS).copied().collect(),
+            right: samples.iter().skip(1).step_by(CHANNELS).copied().collect(),
+        };
+        crate::audio_pcm::write_wav_f32(&mix, &stereo)?;
+        let out = work.path().join("out.wav");
+        let mut command = std::process::Command::new(&cli);
+        music_core::process::ensure_dies_with_parent(&mut command);
+        if let Some(folder) = cli.parent() {
+            command.current_dir(folder);
+            dub_core::proc::libraries_beside(&mut command, folder);
+        }
+        let output = command
+            .arg(self.roformer_sw_path())
+            .arg(&mix)
+            .arg(&out)
+            .output()
+            .with_context(|| format!("run {}", cli.display()))?;
+        if !output.status.success() {
+            let said = |bytes: &[u8]| -> Vec<String> {
+                String::from_utf8_lossy(bytes).lines().map(str::trim).filter(|line| !line.is_empty()).map(str::to_owned).collect()
+            };
+            let mut lines = said(&output.stdout);
+            lines.extend(said(&output.stderr));
+            let tail = lines[lines.len().saturating_sub(12)..].join(" / ");
+            let beside = cli.parent().map(|folder| {
+                let mut names: Vec<String> = std::fs::read_dir(folder)
+                    .map(|entries| entries.flatten().map(|entry| entry.file_name().to_string_lossy().into_owned()).collect())
+                    .unwrap_or_default();
+                names.sort();
+                names.join(", ")
+            }).unwrap_or_default();
+            let failure = if tail.is_empty() { "the engine stopped".to_string() } else { tail };
+            let message = format!("BS-RoFormer SW: {failure} [engine folder {}: {beside}]", cli.parent().map(|folder| folder.display().to_string()).unwrap_or_default());
+            eprintln!("[ERROR] {message}");
+            bail!(message);
+        }
+        let mut stems = Vec::new();
+        for (index, name) in ROFORMER_SW_STEMS.iter().enumerate() {
+            let path = work.path().join(format!("out_stem_{index}.wav"));
+            if !path.is_file() {
+                bail!("BS-RoFormer SW returned no {name} stem");
+            }
+            stems.push(Stem { name: *name, samples: crate::audio_pcm::decode_stereo_44k(&path)? });
+        }
+        Ok(Separated { stems, used_gpu: gpu })
     }
 }
 

@@ -170,11 +170,12 @@ pub fn describe() -> Option<String> {
     .clone()
 }
 
-/// The CUDA builds this platform's engine carries: both on Windows, CUDA 13 in the Linux package.
+/// The CUDA builds this platform's engine carries: both on Windows, and both
+/// in the pod package so the driver alone decides.
 #[cfg(windows)]
 const SHIPPED: &[CudaBuild] = &[CudaBuild::Cuda13, CudaBuild::Cuda12];
 #[cfg(not(windows))]
-const SHIPPED: &[CudaBuild] = &[CudaBuild::Cuda13];
+const SHIPPED: &[CudaBuild] = &[CudaBuild::Cuda13, CudaBuild::Cuda12];
 
 /// Tensor cores before Ampere accumulate in FP16, where the V projection can
 /// overflow to infinity and poison every later attention; the engine's clamp

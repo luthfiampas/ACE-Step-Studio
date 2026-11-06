@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Bug, Check, Copy, FolderOpen, Loader2, Package, RefreshCw } from 'lucide-react';
+import { Bug, Check, Copy, Loader2, Package, RefreshCw } from 'lucide-react';
 import { useI18n } from '../context/I18nContext';
 import { issueReportUrl, type ReportFacts } from '../services/issueReport';
 import { SELF_READ, useSetupStatus } from '../services/studioQueries';
@@ -60,9 +60,6 @@ export const DiagnosticsPanel: React.FC = () => {
       setPacking(false);
     }
   };
-  const reveal = () => { if (pack) post('/v1/diagnostics/report/reveal', { path: pack }).catch((error: unknown) => setProblem(reason(error))); };
-  const revealLogs = () => { post('/v1/diagnostics/logs/reveal').catch((error: unknown) => setProblem(reason(error))); };
-
   const button = 'inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 px-2.5 py-1.5 text-xs font-medium text-zinc-700 hover:border-pink-500 hover:text-pink-500 disabled:opacity-40 dark:border-white/10 dark:text-zinc-200';
   return (
     <section className="space-y-2 rounded-xl border border-zinc-200 p-3 dark:border-white/10" data-settings-part="diagnostics">
@@ -78,14 +75,12 @@ export const DiagnosticsPanel: React.FC = () => {
         <a href={issueReportUrl(STUDIO_REPO_URL, __APP_VERSION__, setup.data)} target="_blank" rel="noopener noreferrer" className={button}>
           <Bug size={13} />{t('diagnosticsReport')}
         </a>
-        <button type="button" onClick={revealLogs} className={button}><FolderOpen size={13} />{t('diagnosticsLogs')}</button>
         <button type="button" onClick={() => load(false)} className={button}><RefreshCw size={13} />{t('diagnosticsRefresh')}</button>
       </div>
       {pack && (
         <p className="flex flex-wrap items-center gap-2 text-[11px]">
           <span className="text-zinc-500">{t('diagnosticsPacked')}</span>
           <span className="break-all font-mono">{pack}</span>
-          <button type="button" onClick={reveal} className="inline-flex items-center gap-1 text-zinc-500 underline hover:text-pink-500"><FolderOpen size={12} />{t('diagnosticsShow')}</button>
         </p>
       )}
       {problem && <p role="alert" className="break-words font-mono text-[11px] text-rose-600 dark:text-rose-300">{problem}</p>}

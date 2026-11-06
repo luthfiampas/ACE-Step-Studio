@@ -210,55 +210,6 @@ pub async fn make_report(State(state): State<AppState>) -> Result<Json<Value>, (
     Ok(Json(json!({ "path": path.to_string_lossy() })))
 }
 
-/// Shows `path` in the system file manager, the file selected where the system can.
-fn reveal(path: &Path, select: bool) -> std::io::Result<()> {
-    #[cfg(windows)]
-    {
-        let mut explorer = std::process::Command::new("explorer.exe");
-        if select { explorer.arg(format!("/select,{}", path.display())) } else { explorer.arg(path) };
-        music_engine::process_group::detach_from_group(&mut explorer).spawn().map(|_| ())
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let mut open = std::process::Command::new("open");
-        if select {
-            open.arg("-R");
-        }
-        open.arg(path).spawn().map(|_| ())
-    }
-    #[cfg(all(not(windows), not(target_os = "macos")))]
-    {
-        let folder = if select { path.parent().unwrap_or(path) } else { path };
-        music_engine::process_group::detach_from_group(&mut dub_core::proc::host_command("xdg-open")).arg(folder).spawn().map(|_| ())
-    }
-}
-
-#[derive(serde::Deserialize)]
-pub struct Revealed {
-    path: String,
-}
-
-/// POST /v1/diagnostics/report/reveal {path}: shows a report of the data folder in the file manager.
-pub async fn reveal_report(Json(asked): Json<Revealed>) -> Result<Json<Value>, (StatusCode, Json<ApiError>)> {
-    let root = crate::studio_data_root().ok_or_else(|| api_error(StatusCode::NOT_FOUND, "the studio has no data directory".into()))?;
-    let asked = PathBuf::from(asked.path);
-    let inside = asked.parent().is_some_and(|parent| parent == root.join("reports")) && asked.extension().is_some_and(|extension| extension == "zip") && asked.is_file();
-    if !inside {
-        return Err(api_error(StatusCode::NOT_FOUND, format!("{} is not a report of this studio", asked.display())));
-    }
-    reveal(&asked, true).map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
-    Ok(Json(json!({ "ok": true })))
-}
-
-/// POST /v1/diagnostics/logs/reveal: the studio's log folder in the file manager.
-pub async fn reveal_logs() -> Result<Json<Value>, (StatusCode, Json<ApiError>)> {
-    let root = crate::studio_data_root().ok_or_else(|| api_error(StatusCode::NOT_FOUND, "the studio has no data directory".into()))?;
-    let dir = root.join("logs");
-    std::fs::create_dir_all(&dir).map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("{}: {error}", dir.display())))?;
-    reveal(&dir, false).map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
-    Ok(Json(json!({ "ok": true })))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

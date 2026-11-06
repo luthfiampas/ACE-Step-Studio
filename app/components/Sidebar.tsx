@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useOpenRouterSettings, useSetupStatus } from '../services/studioQueries';
-import { Disc, Layers, Library, Moon, Newspaper, ScrollText, Search, SlidersHorizontal, Sun } from 'lucide-react';
+import { Disc, Layers, Library, Moon, Newspaper, ScrollText, Search, SlidersHorizontal, Sun, Wrench } from 'lucide-react';
 import { View } from '../types';
 import { useI18n } from '../context/I18nContext';
 import { ResourceMonitor } from './ResourceMonitor';
@@ -117,7 +117,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             {isOpen && (
               <span className="flex min-w-0 flex-col" title={STUDIO.name}>
                 <span className="text-[13px] font-bold leading-[1.15] text-zinc-900 dark:text-white">{STUDIO.name}</span>
-                <span className="flex flex-wrap gap-x-1.5 text-[10px] font-medium leading-4 text-zinc-500 dark:text-zinc-400"><span>v{__APP_VERSION__}</span>{portable && <span>{t('portableEdition')}</span>}</span>
+                <span className="flex flex-wrap gap-x-1.5 text-[10px] font-medium leading-4 text-zinc-500 dark:text-zinc-400"><span>{__GIT_COMMIT__ ? `@${__GIT_COMMIT__}` : `v${__APP_VERSION__}`}</span>{portable && <span>{t('portableEdition')}</span>}</span>
               </span>
             )}
           </div>
@@ -136,6 +136,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <NavItem icon={<Search size={20} />} label={t('search')} active={currentView === 'search'} onClick={() => onNavigate('search')} isExpanded={isOpen} />
           <NavItem icon={<Layers size={20} />} label={t('adaptersNav')} active={currentView === 'adapters'} onClick={() => onNavigate('adapters')} isExpanded={isOpen} />
           <NavItem icon={<SlidersHorizontal size={20} />} label={t('studioTools')} active={currentView === 'tools'} onClick={() => onNavigate('tools')} isExpanded={isOpen} />
+          <NavItem icon={<Wrench size={20} />} label={t('misc')} active={currentView === 'misc'} onClick={() => onNavigate('misc')} isExpanded={isOpen} />
           <NavItem icon={<Newspaper size={20} />} label={t('news')} active={currentView === 'news'} onClick={() => onNavigate('news')} isExpanded={isOpen} />
           {onToggleJournal && <NavItem icon={<ScrollText size={20} />} label={t('journal')} active={journalOpen} opens={journalOpen} onClick={onToggleJournal} isExpanded={isOpen} />}
 

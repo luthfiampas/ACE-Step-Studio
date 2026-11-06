@@ -1,12 +1,26 @@
 import fs from 'fs';
 import path from 'path';
+import { execSync } from 'child_process';
 import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 
 const studio = JSON.parse(fs.readFileSync(path.resolve(import.meta.dirname, '../studio.json'), 'utf-8'));
-const service = `http://127.0.0.1:${studio.port}`;
+/// The launcher may tunnel a local port other than the studio's own.
+const service = `http://127.0.0.1:${process.env.VITE_STUDIO_PORT || studio.port}`;
 const appVersion: string = JSON.parse(fs.readFileSync(path.resolve(import.meta.dirname, '../desktop/src-tauri/tauri.conf.json'), 'utf-8')).version;
+
+/// The commit the window was built from: what the sidebar shows instead of a
+/// release number, which means nothing for a fork that ships by hash.
+const gitCommit = (() => {
+  try {
+    return execSync('git rev-parse --short HEAD', { cwd: path.resolve(import.meta.dirname, '..'), stdio: ['ignore', 'pipe', 'ignore'] })
+      .toString()
+      .trim();
+  } catch {
+    return '';
+  }
+})();
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, '.', '');
@@ -60,6 +74,7 @@ export default defineConfig(({ mode }) => {
     define: {
       __STUDIO__: JSON.stringify(studio),
       __APP_VERSION__: JSON.stringify(appVersion),
+      __GIT_COMMIT__: JSON.stringify(gitCommit),
     },
     plugins: [
       react(),

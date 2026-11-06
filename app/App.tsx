@@ -122,6 +122,7 @@ import { UpdateScreen, readUpdatePlan } from './components/UpdateScreen';
 import { EngineStarting } from './components/EngineStarting';
 import { StudioOffline } from './components/StudioOffline';
 import { StudioToolsPanel } from './components/StudioToolsPanel';
+import { MiscPage } from './components/MiscPage';
 import { createNativePlaylist, deleteNativeSong, moveStoredLikes, setNativeSongLiked, updateNativePlaylist } from './services/nativeLibrary';
 import { foldStems } from './services/songStems';
 import { noteStudioMessage } from './services/journal';
@@ -549,6 +550,12 @@ function AppContent() {
         setCurrentView('search');
       } else if (path === '/news') {
         setCurrentView('news');
+      } else if (path === '/misc' || path.startsWith('/misc/')) {
+        setCurrentView('misc');
+      } else if (path === '/tools') {
+        setCurrentView('tools');
+      } else if (path === '/adapters') {
+        setCurrentView('adapters');
       }
     };
 
@@ -892,7 +899,7 @@ function AppContent() {
   };
 
   // An agent connected over MCP works this window like a user
-  const VIEWS: View[] = ['create', 'library', 'tools', 'adapters', 'playlist', 'search', 'news'];
+  const VIEWS: View[] = ['create', 'library', 'tools', 'misc', 'adapters', 'playlist', 'search', 'news'];
   const songById = (id: unknown) => {
     const song = librarySongs.find(entry => entry.id === id);
     if (!song) throw new Error(`No song ${String(id)} in the library; library_songs_list gives the ids.`);
@@ -1205,7 +1212,7 @@ function AppContent() {
   // page shows: leaving it for the library used to throw away the style, the
   // lyrics, the score and every setting typed into it.
   const createKept = nativeModels !== 'offline' && nativeSetupReady;
-  const showingCreate = !['tools', 'adapters', 'library', 'playlist', 'search', 'news'].includes(currentView);
+  const showingCreate = !['tools', 'misc', 'adapters', 'library', 'playlist', 'search', 'news'].includes(currentView);
 
   // the details show the library's copy of the song, so a cover or a rename
   // made after it was opened appears there too
@@ -1239,6 +1246,9 @@ function AppContent() {
     switch (view) {
       case 'tools':
         return <StudioToolsPanel initialSongId={stemsSongId} />;
+
+      case 'misc':
+        return <MiscPage />;
 
       case 'library': {
         return (
@@ -1495,7 +1505,14 @@ function AppContent() {
               window.history.pushState({}, '', '/news');
             } else if (v === 'tools') {
               window.history.pushState({}, '', '/tools');
+            } else if (v === 'adapters') {
+              window.history.pushState({}, '', '/adapters');
+            } else if (v === 'misc') {
+              window.history.pushState({}, '', '/misc/voice-swap');
             }
+            // pushState does not notify anyone; the page that owns a nested
+            // route (/misc/<tool>) reads it back from this.
+            window.dispatchEvent(new PopStateEvent('popstate'));
             if (isMobile) setShowLeftSidebar(false);
           }}
           theme={theme}

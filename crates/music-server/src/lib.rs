@@ -38,6 +38,8 @@ mod request_log;
 mod resources;
 mod chunked;
 mod separation;
+mod voice_swap;
+mod dereverb;
 mod midi;
 mod midi_edit;
 mod smf;
@@ -157,6 +159,11 @@ struct AppState {
     prepare_train: prepare::TrainSlot,
     /// The update screen's download, while it runs and after.
     update_job: Arc<RwLock<Option<update_screen::Job>>>,
+    /// Voice swap: RVC as an optional engine, installed on request and run as
+    /// one process per job.
+    voice_swap: Arc<voice_swap::VoiceSwap>,
+    /// De-reverb: one model, its runs and its history.
+    dereverb: Arc<dereverb::Dereverb>,
 }
 
 /// A song the create page asks for: the engine's own request fields, flat,
@@ -367,12 +374,9 @@ fn job_from_stored(stored: library::StoredJob, status: MusicJobStatus, message: 
     }
 }
 
-/// How many times a song is started again after the studio closed on it; a
-/// request that takes the engine down every time must not start for ever.
-const MAX_RESUMES: u32 = 3;
-
-/// Songs the studio was closed on are started again, oldest first. The old
-/// job stays as `cancelled`, its message naming the job that took its place.
+/// Songs the studio was closed on stay cancelled. The service may run on a pod
+/// that restarts without the person watching, and a job that resumes there
+/// spends GPU time nobody asked for.
 async fn resume_unfinished_jobs(state: AppState) {
     // what ended without a result stays asked about, as it was left
     match state.library.ended_music_jobs(200) {
@@ -394,49 +398,9 @@ async fn resume_unfinished_jobs(state: AppState) {
             return;
         }
     };
-    // the engine is started with the service and takes a while to answer; if
-    // it never does, the songs stay as they are for the next start
-    let mut ready = false;
-    for _ in 0..90 {
-        if state.music_server.health().await {
-            ready = true;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    }
-    if !ready {
-        studio_log!("[ERROR] the engine did not answer; {} cut-off song(s) were not started again", cut_off.len());
-        return;
-    }
     for old in cut_off {
-        let (resumed_as, message) = if old.attempt >= MAX_RESUMES {
-            (None, format!("Cut off when the studio closed, and already started again {MAX_RESUMES} times; make it again by hand."))
-        } else if let Some(replay) = old.request.get("replay") {
-            match serde_json::from_value::<ReplayMusicJobRequest>(replay.clone()) {
-                Err(error) => (None, format!("Cut off when the studio closed; its request could not be read to start it again: {error}")),
-                Ok(mut request) => {
-                    request.client_ref = None;
-                    match submit_replay_job(state.clone(), request, old.attempt + 1).await {
-                        Ok((_, Json(job))) => (Some(job.id.clone()), format!("Cut off when the studio closed; started again as {}.", job.id)),
-                        Err((_, Json(error))) => (None, format!("Cut off when the studio closed; it could not be started again: {}", error.error)),
-                    }
-                }
-            }
-        } else {
-            match serde_json::from_value::<CreateMusicJobRequest>(old.request.clone()) {
-                Err(error) => (None, format!("Cut off when the studio closed; its request could not be read to start it again: {error}")),
-                Ok(mut request) => {
-                    request.client_ref = None;
-                    let (status, Json(job)) = submit_music_job(state.clone(), request, old.attempt + 1).await;
-                    if status == StatusCode::ACCEPTED {
-                        (Some(job.id.clone()), format!("Cut off when the studio closed; started again as {}.", job.id))
-                    } else {
-                        (None, format!("Cut off when the studio closed; it could not be started again: {}", job.message))
-                    }
-                }
-            }
-        };
-        if let Err(error) = state.library.cancel_cut_off_music_job(&old.id, resumed_as.as_deref(), &message) {
+        let message = "Cut off when the studio closed; not restarted on the headless server.".to_string();
+        if let Err(error) = state.library.cancel_cut_off_music_job(&old.id, None, &message) {
             studio_log!("[ERROR] a cut-off song could not be marked: {error:#}");
         }
         state.jobs.write().await.insert(old.id.clone(), job_from_stored(old, MusicJobStatus::Cancelled, message));
@@ -898,6 +862,12 @@ pub async fn serve() -> anyhow::Result<()> {
         separator: Arc::new(separation::Separator::new(
             &studio_data_root().unwrap_or_else(|| std::path::PathBuf::from(".")),
         )),
+        voice_swap: Arc::new(voice_swap::VoiceSwap::new(
+            &studio_data_root().unwrap_or_else(|| std::path::PathBuf::from(".")),
+        )),
+        dereverb: Arc::new(dereverb::Dereverb::new(
+            &studio_data_root().unwrap_or_else(|| std::path::PathBuf::from(".")),
+        )),
         separation_run: Arc::new(RwLock::new(None)),
         midi: Arc::new(midi::Transcriber::new(&studio_data_root().unwrap_or_else(|| std::path::PathBuf::from(".")))),
         midi_run: Arc::new(RwLock::new(None)),
@@ -975,7 +945,6 @@ pub async fn serve() -> anyhow::Result<()> {
         .route("/engine/presets", get(engine_presets))
         .route("/engine/preset", post(apply_engine_preset))
         .route("/engine/options", get(engine_options).put(update_engine_options))
-        .route("/engine/pick-executable", post(pick_engine_executable))
         .route("/engine/restart", post(restart_local_engine))
         .route("/v1/resources/rescan", post(rescan_resources_route))
         .route("/v1/engine/logs", get(engine_logs))
@@ -986,7 +955,6 @@ pub async fn serve() -> anyhow::Result<()> {
         .route("/v1/openrouter/logs", get(openrouter_logs))
         .route("/v1/files/save", post(saving::choose))
         .route("/v1/files/save/{id}", post(saving::write).layer(DefaultBodyLimit::disable()))
-        .route("/v1/files/reveal", post(saving::reveal))
         .route("/v1/skins", get(skins::list).post(skins::add).layer(DefaultBodyLimit::max(skins::LIMIT)))
         .route("/v1/skins/file/{name}", get(skins::file))
         .route("/v1/network/proxy", get(read_proxy).put(update_proxy))
@@ -1020,6 +988,38 @@ pub async fn serve() -> anyhow::Result<()> {
         .route("/v1/separation/runtime/cancel", post(cancel_separation_download))
         .route("/v1/separation/status", get(separation_status))
         .route("/v1/separation/settings", get(read_separation_settings).put(write_separation_settings))
+        .route("/v1/voice-swap/status", get(voice_swap_status))
+        .route("/v1/voice-swap/install", post(voice_swap_install))
+        .route("/v1/voice-swap/selftest", post(voice_swap_selftest))
+        .route("/v1/voice-swap/cancel", post(voice_swap_cancel))
+        .route("/v1/voice-swap/voices", get(voice_swap_voices).post(voice_swap_create_voice))
+        .route("/v1/voice-swap/draft", get(voice_swap_draft))
+        .route("/v1/voice-swap/voices/{id}", axum::routing::patch(voice_swap_update_voice).delete(voice_swap_delete_voice))
+        .route(
+            "/v1/voice-swap/voices/{id}/recordings",
+            post(voice_swap_upload_recordings).layer(DefaultBodyLimit::max(512 * 1024 * 1024)),
+        )
+        .route("/v1/voice-swap/voices/{id}/recordings/{name}", axum::routing::delete(voice_swap_delete_recording))
+        .route(
+            "/v1/voice-swap/voices/{id}/checkpoints/{epoch}",
+            axum::routing::delete(voice_swap_delete_checkpoint),
+        )
+        .route(
+            "/v1/voice-swap/voices/{id}/checkpoints/prune",
+            post(voice_swap_prune_checkpoints),
+        )
+        .route("/v1/voice-swap/voices/{id}/train", post(voice_swap_train))
+        .route("/v1/voice-swap/stems", get(voice_swap_stems))
+        .route("/v1/dereverb/status", get(dereverb_status))
+        .route("/v1/dereverb/install", post(dereverb_install))
+        .route("/v1/dereverb/cancel", post(dereverb_cancel))
+        .route("/v1/dereverb/stems", get(dereverb_stems))
+        .route("/v1/dereverb/jobs", get(dereverb_jobs).post(dereverb_start))
+        .route("/v1/dereverb/jobs/{id}", axum::routing::delete(dereverb_delete))
+        .route("/v1/dereverb/jobs/{id}/{stem}", get(dereverb_audio))
+        .route("/v1/voice-swap/swaps", get(voice_swap_swaps).post(voice_swap_start_swap))
+        .route("/v1/voice-swap/swaps/{id}", axum::routing::delete(voice_swap_delete_swap))
+        .route("/v1/voice-swap/swaps/{id}/audio", get(voice_swap_swap_audio))
         .route("/v1/separation/install", post(install_separation_model))
         .route("/v1/separation/remove", post(remove_separation_model))
         .route("/v1/library/songs/{id}/process", post(start_processing))
@@ -1028,7 +1028,6 @@ pub async fn serve() -> anyhow::Result<()> {
         .route("/v1/processing", get(read_processing))
         .route("/v1/processing/vst", get(read_vst))
         .route("/v1/processing/vst/scan", post(scan_vst))
-        .route("/v1/processing/vst/editor", post(open_vst_editor))
         .route("/v1/adapters", get(list_adapters))
         .route("/v1/adapters/import", post(import_adapter))
         .route("/v1/adapters/import-folder", post(import_adapter_folder))
@@ -1044,7 +1043,6 @@ pub async fn serve() -> anyhow::Result<()> {
         .route("/v1/training/datasets", post(create_training_dataset))
         // A dataset is gigabytes of lossless audio, far over the studio's usual body limit.
         .route("/v1/training/datasets/import", post(import_training_dataset).layer(DefaultBodyLimit::max(TRAINING_UPLOAD_LIMIT)))
-        .route("/v1/training/datasets/{id}/reveal", post(reveal_training_dataset))
         .route("/v1/training/datasets/{id}", axum::routing::patch(update_training_dataset).delete(delete_training_dataset))
         .route("/v1/training/datasets/{id}/songs", post(add_training_songs))
         .route("/v1/training/datasets/{id}/files", post(upload_training_files).layer(DefaultBodyLimit::max(TRAINING_UPLOAD_LIMIT)))
@@ -1119,11 +1117,8 @@ pub async fn serve() -> anyhow::Result<()> {
         .route("/setup/download", post(setup_download))
         .route("/setup/remove", post(setup_remove))
         .route("/setup/adopt", post(setup_adopt))
-        .route("/v1/open-data-directory", post(open_data_directory))
         .route("/v1/diagnostics", get(diagnostics::get))
         .route("/v1/diagnostics/report", post(diagnostics::make_report))
-        .route("/v1/diagnostics/report/reveal", post(diagnostics::reveal_report))
-        .route("/v1/diagnostics/logs/reveal", post(diagnostics::reveal_logs))
         .route("/setup/select", post(setup_select))
         .route("/setup/cancel", post(setup_cancel))
         .route("/setup/update", get(setup_update))
@@ -1551,7 +1546,13 @@ fn engine_stems(engine: separation::Engine) -> &'static [&'static str] {
     match engine {
         separation::Engine::Htdemucs => &separation::STEMS,
         separation::Engine::Roformer => &separation::ROFORMER_STEMS,
+        separation::Engine::RoformerSw => &separation::ROFORMER_SW_STEMS,
     }
+}
+
+/// The model a separator runs: BS-RoFormer SW on the same engine build, or Mel-Band RoFormer.
+fn roformer_model(engine: separation::Engine) -> &'static downloads::Asset {
+    if engine == separation::Engine::RoformerSw { &separation::ROFORMER_SW_MODEL } else { &separation::ROFORMER_MODEL }
 }
 
 /// Whether Mel-Band RoFormer runs on the card: an NVIDIA card, a runtime choice other than the
@@ -1571,10 +1572,15 @@ fn roformer_set(gpu: bool) -> Vec<&'static downloads::Asset> {
     std::iter::once(&separation::ROFORMER_MODEL).chain(separation::Separator::roformer_engine(gpu)).collect()
 }
 
+fn roformer_sw_set(gpu: bool) -> Vec<&'static downloads::Asset> {
+    std::iter::once(&separation::ROFORMER_SW_MODEL).chain(separation::Separator::roformer_engine(gpu)).collect()
+}
+
 fn stems_on_disk(state: &AppState, song_id: &str) -> Vec<String> {
     separation::STEMS
         .iter()
         .chain(separation::ROFORMER_STEMS.iter().filter(|stem| !separation::STEMS.contains(stem)))
+        .chain(separation::ROFORMER_SW_STEMS.iter().filter(|stem| !separation::STEMS.contains(stem)))
         .filter(|stem| stem_path(state, song_id, stem).is_file())
         .map(|stem| (*stem).to_string())
         .collect()
@@ -1585,9 +1591,9 @@ fn stems_on_disk(state: &AppState, song_id: &str) -> Vec<String> {
 /// page lists all three the same way.
 async fn separation_assets(State(state): State<AppState>) -> Json<Value> {
     let config = state.separation_config.read().await.clone();
-    if config.engine == separation::Engine::Roformer {
+    if matches!(config.engine, separation::Engine::Roformer | separation::Engine::RoformerSw) {
         let gpu = roformer_on_card(&state, config.runtime);
-        let set = roformer_set(gpu);
+        let set = if config.engine == separation::Engine::RoformerSw { roformer_sw_set(gpu) } else { roformer_set(gpu) };
         let downloader = state.separator.downloader();
         let assets: Vec<Value> = set
             .iter()
@@ -1736,16 +1742,19 @@ async fn install_separation_asset(
     let device = |id: &str| if id == "cpu" { lyrics_sync::OnnxFlavour::Cpu } else { lyrics_sync::OnnxFlavour::Auto };
     let (engine, device_id) = match request.asset_id.as_str() {
         "roformer" => (Some(separation::Engine::Roformer), if chosen_runtime == lyrics_sync::OnnxFlavour::Cpu { "cpu" } else { "auto" }),
+        "roformer-sw" => (Some(separation::Engine::RoformerSw), if chosen_runtime == lyrics_sync::OnnxFlavour::Cpu { "cpu" } else { "auto" }),
         "htdemucs" => (Some(separation::Engine::Htdemucs), if chosen_runtime == lyrics_sync::OnnxFlavour::Cpu { "cpu" } else { "auto" }),
         id @ ("auto" | "cuda" | "cpu") => (Some(chosen_engine), id),
         _ => (None, ""),
     };
-    if engine == Some(separation::Engine::Roformer) {
+    if matches!(engine, Some(separation::Engine::Roformer | separation::Engine::RoformerSw)) {
         let wanted = device(device_id);
         let gpu = roformer_on_card(&state, wanted);
-        let set = roformer_set(gpu);
+        let sw = engine == Some(separation::Engine::RoformerSw);
+        let set = if sw { roformer_sw_set(gpu) } else { roformer_set(gpu) };
+        let label = if sw { "BS-RoFormer SW" } else { "Mel-Band RoFormer" };
         if set.len() < 2 {
-            return Err(api_error(StatusCode::BAD_REQUEST, "Mel-Band RoFormer has no build for this platform; HT-Demucs separates here".into()));
+            return Err(api_error(StatusCode::BAD_REQUEST, format!("{label} has no build for this platform; HT-Demucs separates here")));
         }
         let separator = state.separator.clone();
         let libraries = state.engine_runtime.library_dir();
@@ -1758,7 +1767,7 @@ async fn install_separation_asset(
                     }
                 }
                 Ok(()) => {}
-                Err(error) => studio_log!("[ERROR] Mel-Band RoFormer could not be installed: {error:#}"),
+                Err(error) => studio_log!("[ERROR] {label} could not be installed: {error:#}"),
             }
         });
         return Ok(Json(serde_json::json!({ "started": true })));
@@ -1847,10 +1856,12 @@ async fn separation_status(State(state): State<AppState>) -> Json<Value> {
     let card = lyrics_sync::OnnxFlavour::Auto.card().filter(|card| separates_on(*card));
     let model = match engine {
         separation::Engine::Roformer => &separation::ROFORMER_MODEL,
+        separation::Engine::RoformerSw => &separation::ROFORMER_SW_MODEL,
         separation::Engine::Htdemucs => &separation::MODEL,
     };
     let model_installed = match engine {
         separation::Engine::Roformer => state.separator.roformer_installed(roformer_on_card(&state, runtime_choice)),
+        separation::Engine::RoformerSw => state.separator.roformer_sw_installed(roformer_on_card(&state, runtime_choice)),
         separation::Engine::Htdemucs => state.separator.is_installed(),
     };
     Json(serde_json::json!({
@@ -1866,7 +1877,7 @@ async fn separation_status(State(state): State<AppState>) -> Json<Value> {
         // CUDA's, and whether every library of it is installed
         "card": card,
         "card_runtime_installed": match engine {
-            separation::Engine::Roformer => roformer_on_card(&state, lyrics_sync::OnnxFlavour::Auto),
+            separation::Engine::Roformer | separation::Engine::RoformerSw => roformer_on_card(&state, lyrics_sync::OnnxFlavour::Auto),
             separation::Engine::Htdemucs => card.is_some_and(|card| state.lyrics_sync.has_card_libraries(card)),
         },
         "card_missing_bytes": separation_card_assets(lyrics_sync::OnnxFlavour::Auto)
@@ -1877,6 +1888,7 @@ async fn separation_status(State(state): State<AppState>) -> Json<Value> {
             .sum::<u64>(),
         "ready": match engine {
             separation::Engine::Roformer => state.separator.roformer_installed(roformer_on_card(&state, runtime_choice)),
+            separation::Engine::RoformerSw => state.separator.roformer_sw_installed(roformer_on_card(&state, runtime_choice)),
             separation::Engine::Htdemucs => state.separator.ready(runtime.as_deref()),
         },
         "engine": engine,
@@ -2024,15 +2036,10 @@ async fn import_adapter(
 }
 
 /// Takes LoRAs from a folder the user keeps them in for every program - ComfyUI's, a trainer's -
-/// without copying them: a folder the window picks, or the one an agent names.
+/// without copying them. The folder is named, not picked: the service may run
+/// on another computer, where a dialog would open on the wrong one.
 async fn import_adapter_folder(State(state): State<AppState>, body: axum::body::Bytes) -> Result<Json<Value>, (StatusCode, Json<ApiError>)> {
-    let named = serde_json::from_slice::<Value>(&body).ok().and_then(|value| value.get("path").and_then(Value::as_str).map(std::path::PathBuf::from));
-    let picked = match named {
-        Some(folder) => Some(folder),
-        None => tokio::task::spawn_blocking(|| rfd::FileDialog::new().set_title("Folder with LoRA").pick_folder())
-            .await
-            .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?,
-    };
+    let picked = serde_json::from_slice::<Value>(&body).ok().and_then(|value| value.get("path").and_then(Value::as_str).map(std::path::PathBuf::from));
     let Some(folder) = picked else {
         return Ok(Json(serde_json::json!({ "picked": false, "imported": [] })));
     };
@@ -2201,22 +2208,6 @@ async fn scan_vst() -> Result<Json<Value>, (StatusCode, Json<ApiError>)> {
         .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
         .map_err(|error| api_error(StatusCode::BAD_GATEWAY, format!("{error:#}")))?;
     Ok(Json(serde_json::json!({ "available": true, "plugins": plugins })))
-}
-
-#[derive(Debug, Deserialize)]
-struct VstEditorRequest {
-    path: String,
-    #[serde(default)]
-    state_id: Option<String>,
-}
-
-/// Opens a plugin's window; the settings save into the slot's state when it closes.
-async fn open_vst_editor(Json(input): Json<VstEditorRequest>) -> Result<Json<Value>, (StatusCode, Json<ApiError>)> {
-    let host = studio_data_root()
-        .and_then(|root| vst::VstHost::locate(&root))
-        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "the VST host is not installed with this studio".into()))?;
-    let state_id = host.open_editor(&input.path, input.state_id).map_err(|error| api_error(StatusCode::BAD_REQUEST, format!("{error:#}")))?;
-    Ok(Json(serde_json::json!({ "state_id": state_id })))
 }
 
 async fn read_processing(State(state): State<AppState>) -> Json<Value> {
@@ -2689,19 +2680,6 @@ async fn import_training_dataset(State(state): State<AppState>, mut multipart: M
     let outcome = tokio::task::spawn_blocking(move || training.import_dataset(&manifest, &files)).await;
     drop(folder);
     outcome.map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?.map(Json).map_err(training_error)
-}
-
-/// Opens a dataset's folder in the file manager, to copy it to another studio.
-async fn reveal_training_dataset(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>, (StatusCode, Json<ApiError>)> {
-    let folder = state.training.dataset_folder(&id).map_err(training_error)?;
-    #[cfg(windows)]
-    let opened = music_engine::process_group::detach_from_group(&mut std::process::Command::new("explorer.exe")).arg(&folder).spawn();
-    #[cfg(target_os = "macos")]
-    let opened = std::process::Command::new("open").arg(&folder).spawn();
-    #[cfg(all(not(windows), not(target_os = "macos")))]
-    let opened = music_engine::process_group::detach_from_group(&mut dub_core::proc::host_command("xdg-open")).arg(&folder).spawn();
-    opened.map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
-    Ok(Json(serde_json::json!({ "opened": folder.display().to_string() })))
 }
 
 async fn update_training_dataset(State(state): State<AppState>, Path(id): Path<String>, Json(input): Json<DatasetInput>) -> Result<Json<training::Dataset>, (StatusCode, Json<ApiError>)> {
@@ -3236,11 +3214,17 @@ async fn start_separation(
             .onnx_card(wanted_runtime)
             .map_err(|error| api_error(StatusCode::BAD_REQUEST, format!("{error:#}")))?
             .filter(|card| separates_on(*card)),
-        separation::Engine::Roformer => None,
+        separation::Engine::Roformer | separation::Engine::RoformerSw => None,
     };
     let roformer_gpu = roformer_on_card(&state, wanted_runtime);
-    if engine == separation::Engine::Roformer && !state.separator.roformer_installed(roformer_gpu) {
-        return Err(api_error(StatusCode::BAD_REQUEST, "Mel-Band RoFormer is not installed yet: Settings - Models - Stems".into()));
+    let roformer_ready = match engine {
+        separation::Engine::Roformer => state.separator.roformer_installed(roformer_gpu),
+        separation::Engine::RoformerSw => state.separator.roformer_sw_installed(roformer_gpu),
+        separation::Engine::Htdemucs => true,
+    };
+    if matches!(engine, separation::Engine::Roformer | separation::Engine::RoformerSw) && !roformer_ready {
+        let label = if engine == separation::Engine::RoformerSw { "BS-RoFormer SW" } else { "Mel-Band RoFormer" };
+        return Err(api_error(StatusCode::BAD_REQUEST, format!("{label} is not installed yet: Settings - Models - Stems")));
     }
     if engine == separation::Engine::Htdemucs && !state.separator.is_installed() {
         return Err(api_error(StatusCode::BAD_REQUEST, "the separation model is not installed yet".into()));
@@ -3263,6 +3247,18 @@ async fn start_separation(
     tokio::task::spawn_blocking(move || {
         let outcome = (|| -> anyhow::Result<(Vec<String>, bool)> {
             let audio = audio_pcm::decode_stereo_44k(&audio_path)?;
+            if engine == separation::Engine::RoformerSw {
+                let separated = separator.separate_roformer_sw(&audio, roformer_gpu)?;
+                let mut written = Vec::new();
+                let ran_on_gpu = separated.used_gpu;
+                for stem in separated.stems {
+                    if wanted.iter().any(|name| name == stem.name) {
+                        separation::write_wav_stereo(&stem_path(&background, &song_id, stem.name), &stem.samples)?;
+                        written.push(stem.name.to_string());
+                    }
+                }
+                return Ok((written, ran_on_gpu));
+            }
             if engine == separation::Engine::Roformer {
                 let (vocals, instrumental) = separator.separate_roformer(&audio, roformer_gpu)?;
                 let mut written = Vec::new();
@@ -3296,7 +3292,11 @@ async fn start_separation(
             Ok((written, ran_on_gpu))
         })();
         // still on this thread: the stems are hundreds of megabytes to copy
-        let model = if engine == separation::Engine::Roformer { "Mel-Band RoFormer" } else { "HT-Demucs" };
+        let model = match engine {
+            separation::Engine::Roformer => "Mel-Band RoFormer",
+            separation::Engine::RoformerSw => "BS-RoFormer SW",
+            separation::Engine::Htdemucs => "HT-Demucs",
+        };
         let library = outcome.as_ref().ok().map(|(stems, _)| stems_into_library(&background, &song_id, stems, overlap, model));
 
         let handle = tokio::runtime::Handle::current();
@@ -4621,28 +4621,6 @@ async fn restart_local_engine(State(state): State<AppState>) -> Result<Json<Valu
     let _restart = state.engine_use.write().await;
     restart_engine(&state).await.map_err(|error| api_error(StatusCode::SERVICE_UNAVAILABLE, error))?;
     Ok(Json(serde_json::json!({ "engine_id": PRIMARY_MUSIC_ENGINE_ID, "restarted": true })))
-}
-
-/// Opens the native file picker for an engine executable. The window is a
-/// browser and cannot open one itself, so the studio picks on its behalf and
-/// hands the path back; nothing changes until the user saves the options, the
-/// same as every other field on that page.
-async fn pick_engine_executable() -> Result<Json<Value>, (StatusCode, Json<ApiError>)> {
-    let picked = tokio::task::spawn_blocking(|| {
-        let mut dialog = rfd::FileDialog::new().set_title("The engine executable to run instead of the bundled one".to_string());
-        // An extension filter would hide a Linux build, which has none.
-        #[cfg(windows)]
-        {
-            dialog = dialog.add_filter("Engine executable", &["exe"]);
-        }
-        dialog.pick_file()
-    })
-    .await
-    .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
-    Ok(Json(serde_json::json!({
-        "picked": picked.is_some(),
-        "path": picked.map(|path| path.to_string_lossy().into_owned()),
-    })))
 }
 
 /// A job is running and the engine the studio started is still a running process.
@@ -6142,10 +6120,14 @@ async fn karaoke_remove(
 }
 
 async fn remove_separation_model(State(state): State<AppState>, request: Option<Json<InstallSeparationAssetRequest>>) -> Result<Json<Value>, (StatusCode, Json<ApiError>)> {
-    let roformer = request.is_some_and(|Json(request)| request.asset_id == "roformer");
+    let named = request.and_then(|Json(request)| match request.asset_id.as_str() {
+        "roformer" => Some(separation::Engine::Roformer),
+        "roformer-sw" => Some(separation::Engine::RoformerSw),
+        _ => None,
+    });
     let downloader = state.separator.downloader();
-    let freed = if roformer {
-        let mut freed = downloader.remove(&separation::ROFORMER_MODEL).map_err(|error| api_error(StatusCode::CONFLICT, error.to_string()))?;
+    let freed = if let Some(engine) = named {
+        let mut freed = downloader.remove(roformer_model(engine)).map_err(|error| api_error(StatusCode::CONFLICT, error.to_string()))?;
         for engine in [true, false].into_iter().filter_map(separation::Separator::roformer_engine) {
             freed += downloader.remove(engine).map_err(|error| api_error(StatusCode::CONFLICT, error.to_string()))?;
         }
@@ -7669,24 +7651,16 @@ fn adopt_refusals(components: &[model_manager::Component], root: &std::path::Pat
 /// Takes models the user already has instead of downloading them again.
 ///
 /// Anyone who has run ACE-Step through acestep.cpp or another build already has these
-/// weights on disk, and they are gigabytes each. This opens a folder picker,
-/// looks for the files the catalogue names - by name, then by their contents -
-/// and hard-links or copies them into the studio's own model directory.
+/// weights on disk, and they are gigabytes each. The folder is named, not
+/// picked: the service may run on another computer, where a dialog would open
+/// on the wrong one. The files the catalogue names are found by name, then by
+/// their contents, and hard-linked or copied into the studio's model directory.
 async fn setup_adopt(State(state): State<AppState>, body: axum::body::Bytes) -> Result<Json<Value>, (StatusCode, Json<ApiError>)> {
     let Some(models_root) = studio_data_root().map(|root| root.join("models").join(model_manager::ENGINE_ID)) else {
         return Err(api_error(StatusCode::INTERNAL_SERVER_ERROR, "the studio has no data directory".into()));
     };
     let catalog = state.model_manager.catalog();
-    // a folder an agent names is taken as it is; the window asks the user
-    let named = serde_json::from_slice::<Value>(&body).ok().and_then(|value| value.get("path").and_then(Value::as_str).map(std::path::PathBuf::from));
-    let picked = match named {
-        Some(folder) => Some(folder),
-        None => tokio::task::spawn_blocking(move || {
-            rfd::FileDialog::new().set_title(format!("Folder with {} models", music_core::studio().artist)).pick_folder()
-        })
-        .await
-        .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?,
-    };
+    let picked = serde_json::from_slice::<Value>(&body).ok().and_then(|value| value.get("path").and_then(Value::as_str).map(std::path::PathBuf::from));
 
     let Some(folder) = picked else {
         return Ok(Json(serde_json::json!({ "picked": false, "adopted": [] })));
@@ -7734,25 +7708,6 @@ async fn setup_adopt(State(state): State<AppState>, body: axum::body::Bytes) -> 
         "refused": refused,
         "status": compose_setup_status(&state, status).await,
     })))
-}
-
-/// Opens the studio's own folder in the system file manager.
-///
-/// Saying where the ten gigabytes are is half an answer; the other half is
-/// getting there without retyping a path from a settings screen.
-async fn open_data_directory() -> Result<Json<Value>, (StatusCode, Json<ApiError>)> {
-    let Some(root) = studio_data_root() else {
-        return Err(api_error(StatusCode::NOT_FOUND, "the studio has no data directory".into()));
-    };
-    let _ = std::fs::create_dir_all(&root);
-    #[cfg(windows)]
-    let opened = music_engine::process_group::detach_from_group(&mut std::process::Command::new("explorer.exe")).arg(&root).spawn();
-    #[cfg(target_os = "macos")]
-    let opened = std::process::Command::new("open").arg(&root).spawn();
-    #[cfg(all(not(windows), not(target_os = "macos")))]
-    let opened = music_engine::process_group::detach_from_group(&mut dub_core::proc::host_command("xdg-open")).arg(&root).spawn();
-    opened.map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
-    Ok(Json(serde_json::json!({ "opened": root.display().to_string() })))
 }
 
 async fn setup_catalog(State(state): State<AppState>) -> Json<Value> {
@@ -7877,7 +7832,11 @@ fn update_catalogue(part: update_screen::Part) -> Vec<&'static downloads::Asset>
     let mut assets: Vec<&'static downloads::Asset> = match part {
         Part::Engine => engine_runtime::ASSETS.iter().collect(),
         Part::Karaoke => lyrics_sync::ASSETS.iter().collect(),
-        Part::Separation => std::iter::once(&separation::MODEL).chain(roformer_set(true)).chain(roformer_set(false)).collect(),
+        Part::Separation => std::iter::once(&separation::MODEL)
+            .chain(std::iter::once(&separation::ROFORMER_SW_MODEL))
+            .chain(roformer_set(true))
+            .chain(roformer_set(false))
+            .collect(),
         Part::Midi => vec![midi::tool_asset()],
         Part::Training => training::pack().iter().collect(),
         Part::Listening => training::listen_pack().iter().collect(),
@@ -9408,6 +9367,514 @@ fn uuid_suffix() -> String {
 fn api_error(status: StatusCode, error: String) -> (StatusCode, Json<ApiError>) {
     (status, Json(ApiError { error }))
 }
+
+async fn voice_swap_status(State(state): State<AppState>) -> Json<Value> {
+    let swap = &state.voice_swap;
+    let job = swap.job();
+    let elapsed = job
+        .as_ref()
+        .filter(|job| job.started_ms > 0)
+        .map(|job| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|now| now.as_millis() as u64)
+                .unwrap_or(job.started_ms)
+                .saturating_sub(job.started_ms) as f64
+                / 1000.0
+        })
+        .unwrap_or_default();
+    Json(serde_json::json!({
+        "installed": swap.installed(),
+        "runtime_installed": swap.runtime_installed(),
+        "missing": swap.missing(),
+        "busy": swap.busy().await,
+        "root": swap.root().to_string_lossy(),
+        "elapsed": elapsed,
+        "job": job,
+    }))
+}
+
+/// Fetches RVC and its weights. One installer at a time; the page follows it
+/// through `/v1/voice-swap/status`.
+#[derive(serde::Deserialize, Default)]
+struct InstallChoice {
+    /// Only Python and torch: the half every Python tool shares.
+    #[serde(default)]
+    runtime: bool,
+}
+
+async fn voice_swap_install(
+    State(state): State<AppState>,
+    Query(choice): Query<InstallChoice>,
+) -> Result<Json<Value>, (StatusCode, Json<ApiError>)> {
+    state.voice_swap.install(choice.runtime).await.map_err(|error| api_error(StatusCode::CONFLICT, error.to_string()))?;
+    Ok(Json(serde_json::json!({ "started": true })))
+}
+
+/// Proves the installed engine can import torch, find RVC and see its weights
+/// before a training run spends twenty minutes discovering it cannot.
+async fn voice_swap_selftest(State(state): State<AppState>) -> Result<Json<Value>, (StatusCode, Json<ApiError>)> {
+    state.voice_swap.selftest().await.map_err(|error| api_error(StatusCode::CONFLICT, error.to_string()))?;
+    Ok(Json(serde_json::json!({ "started": true })))
+}
+
+async fn voice_swap_cancel(State(state): State<AppState>) -> Json<Value> {
+    Json(serde_json::json!({ "stopped": state.voice_swap.cancel().await }))
+}
+
+fn voice_json(state: &AppState, voice: &voice_swap::Voice) -> Value {
+    let mut value = serde_json::to_value(voice).unwrap_or(Value::Null);
+    if let Value::Object(fields) = &mut value {
+        fields.insert("minutes".into(), serde_json::json!(voice.minutes()));
+        fields.insert("trained".into(), serde_json::json!(state.voice_swap.trained(voice)));
+    }
+    value
+}
+
+/// The trained voices. An untrained folder is the draft and is not listed here.
+async fn voice_swap_voices(State(state): State<AppState>) -> Json<Value> {
+    let voices: Vec<Value> = state
+        .voice_swap
+        .voices()
+        .iter()
+        .filter(|voice| state.voice_swap.trained(voice))
+        .map(|voice| voice_json(&state, voice))
+        .collect();
+    Json(Value::Array(voices))
+}
+
+/// The recordings waiting to be trained, if any: the newest untrained voice.
+async fn voice_swap_draft(State(state): State<AppState>) -> Json<Value> {
+    let draft = state.voice_swap.voices().into_iter().find(|voice| !state.voice_swap.trained(voice));
+    Json(draft.map(|voice| voice_json(&state, &voice)).unwrap_or(Value::Null))
+}
+
+async fn voice_swap_create_voice(State(state): State<AppState>, Json(input): Json<Value>) -> Result<Json<Value>, (StatusCode, Json<ApiError>)> {
+    let name = input.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+    let voice = state.voice_swap.create_voice(&name).map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?;
+    Ok(Json(voice_json(&state, &voice)))
+}
+
+async fn voice_swap_update_voice(State(state): State<AppState>, Path(id): Path<String>, Json(input): Json<Value>) -> Result<Json<Value>, (StatusCode, Json<ApiError>)> {
+    if locked_voice(&state).await.as_deref() == Some(id.as_str()) {
+        return Err(api_error(StatusCode::CONFLICT, "this voice is being used by a running job".to_string()));
+    }
+    let name = input.get("name").and_then(Value::as_str);
+    let used = input.get("used").and_then(Value::as_u64).map(|used| used as u32);
+    let epochs = input.get("epochs").and_then(Value::as_u64).map(|value| value as u32);
+    let save_every = input.get("save_every").and_then(Value::as_u64).map(|value| value as u32);
+    let voice = state
+        .voice_swap
+        .update_voice(&id, name, used, epochs, save_every)
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?;
+    Ok(Json(voice_json(&state, &voice)))
+}
+
+async fn voice_swap_delete_voice(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>, (StatusCode, Json<ApiError>)> {
+    if state.voice_swap.busy().await {
+        return Err(api_error(StatusCode::CONFLICT, "a voice swap job is running; delete when it ends".to_string()));
+    }
+    state.voice_swap.delete_voice(&id).map_err(|error| api_error(StatusCode::NOT_FOUND, error.to_string()))?;
+    Ok(Json(serde_json::json!({ "deleted": true })))
+}
+
+/// Uploads takes into a voice. The page sends an ordinary file input, so the
+/// fields arrive as the browser made them; each one is copied and measured.
+async fn voice_swap_upload_recordings(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    mut multipart: Multipart,
+) -> Result<Json<Value>, (StatusCode, Json<ApiError>)> {
+    if locked_voice(&state).await.as_deref() == Some(id.as_str()) {
+        return Err(api_error(StatusCode::CONFLICT, "this voice is being used by a running job".to_string()));
+    }
+    let folder = UploadFolder::new()?;
+    let mut saved = 0;
+    let mut voice = None;
+    while let Some(field) = multipart.next_field().await.map_err(|error| api_error(StatusCode::BAD_REQUEST, format!("read the upload: {error}")))? {
+        let Some(name) = field.file_name().map(str::to_owned) else { continue };
+        let lower = name.to_lowercase();
+        let extension = std::path::Path::new(&lower).extension().and_then(|extension| extension.to_str());
+        if !extension.is_some_and(audio_pcm::reads_audio) {
+            continue;
+        }
+        let base = name.rsplit(['/', '\\']).next().unwrap_or(&name).to_string();
+        let temporary = folder.0.join(format!("{saved}-{base}"));
+        save_upload(field, &temporary).await?;
+        let swap = state.voice_swap.clone();
+        let id = id.clone();
+        let outcome = tokio::task::spawn_blocking(move || swap.add_recording(&id, &name, &temporary))
+            .await
+            .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("add the recording: {error}")))?;
+        voice = Some(outcome.map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?);
+        saved += 1;
+    }
+    let Some(voice) = voice else {
+        return Err(api_error(StatusCode::BAD_REQUEST, format!("no audio in the upload: {}", audio_pcm::AUDIO_EXTENSIONS.join(", "))));
+    };
+    Ok(Json(serde_json::json!({ "voice": voice, "saved": saved })))
+}
+
+/// The voice a running job actually holds: the one being trained, or the one a
+/// swap is singing through. Editing another voice is not that job's business.
+async fn locked_voice(state: &AppState) -> Option<String> {
+    let job = state.voice_swap.job().filter(|job| !job.done)?;
+    match job.kind.as_str() {
+        "train" => Some(job.subject.clone()),
+        "convert" => state.voice_swap.swap(&job.subject).ok().map(|swap| swap.voice),
+        _ => None,
+    }
+}
+
+/// Keeps the named checkpoints and deletes the rest.
+async fn voice_swap_prune_checkpoints(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(input): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<ApiError>)> {
+    if locked_voice(&state).await.as_deref() == Some(id.as_str()) {
+        return Err(api_error(StatusCode::CONFLICT, "this voice is being used by a running job".to_string()));
+    }
+    let keep: Vec<u32> = input
+        .get("keep")
+        .and_then(Value::as_array)
+        .map(|epochs| epochs.iter().filter_map(Value::as_u64).map(|epoch| epoch as u32).collect())
+        .unwrap_or_default();
+    let voice = state
+        .voice_swap
+        .prune_checkpoints(&id, &keep)
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?;
+    Ok(Json(voice_json(&state, &voice)))
+}
+
+/// Removes one checkpoint, keeping the recordings and the rest of the model.
+async fn voice_swap_delete_checkpoint(
+    State(state): State<AppState>,
+    Path((id, epoch)): Path<(String, u32)>,
+) -> Result<Json<Value>, (StatusCode, Json<ApiError>)> {
+    if locked_voice(&state).await.as_deref() == Some(id.as_str()) {
+        return Err(api_error(StatusCode::CONFLICT, "this voice is being used by a running job".to_string()));
+    }
+    let voice = state
+        .voice_swap
+        .remove_checkpoint(&id, epoch)
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?;
+    Ok(Json(voice_json(&state, &voice)))
+}
+
+async fn voice_swap_delete_recording(
+    State(state): State<AppState>,
+    Path((id, name)): Path<(String, String)>,
+) -> Result<Json<Value>, (StatusCode, Json<ApiError>)> {
+    if locked_voice(&state).await.as_deref() == Some(id.as_str()) {
+        return Err(api_error(StatusCode::CONFLICT, "this voice is being used by a running job".to_string()));
+    }
+    let voice = state.voice_swap.remove_recording(&id, &name).map_err(|error| api_error(StatusCode::NOT_FOUND, error.to_string()))?;
+    Ok(Json(voice_json(&state, &voice)))
+}
+
+/// Trains the voice from its recordings. The page waits on `/status` like any
+/// other job; what it produced is read back into the voice when it ends.
+async fn voice_swap_train(State(state): State<AppState>, Path(id): Path<String>, Json(input): Json<Value>) -> Result<Json<Value>, (StatusCode, Json<ApiError>)> {
+    let number = |key: &str, default: u64| input.get(key).and_then(Value::as_u64).unwrap_or(default) as u32;
+    let name = input.get("name").and_then(Value::as_str);
+    state
+        .voice_swap
+        .train(&id, name, number("epochs", 20), number("save_every", 5), number("batch", 0))
+        .await
+        .map_err(|error| api_error(StatusCode::CONFLICT, error.to_string()))?;
+    Ok(Json(serde_json::json!({ "started": true })))
+}
+
+/// The vocal stems already separated in the library, newest song first.
+async fn voice_swap_stems(State(state): State<AppState>) -> Json<Value> {
+    let mut stems: Vec<Value> = Vec::new();
+    // A song being separated right now has a half-written vocals file; it is
+    // offered again on the next poll, once the run is over.
+    let separating = state
+        .separation_run
+        .read()
+        .await
+        .as_ref()
+        .filter(|run| !run.done)
+        .map(|run| run.song_id.clone());
+    // One pass over the media folder instead of seven stats per song: every
+    // vocal stem is a file named "<song id>-vocals.wav". The library list is
+    // only read for the titles.
+    if let Ok(entries) = std::fs::read_dir(state.library.media_dir()) {
+        let titles: std::collections::HashMap<String, String> = state
+            .library
+            .list_songs()
+            .map(|songs| songs.into_iter().map(|song| (song.id, song.title)).collect())
+            .unwrap_or_default();
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Some(song_id) = name.strip_suffix("-vocals.wav") else { continue };
+            if separating.as_deref() == Some(song_id) {
+                continue;
+            }
+            let Some(title) = titles.get(song_id) else { continue };
+            stems.push(serde_json::json!({
+                "song_id": song_id,
+                "title": title,
+                "stem": "vocals",
+            }));
+        }
+        stems.sort_by(|a, b| a["song_id"].as_str().cmp(&b["song_id"].as_str()));
+    }
+    Json(Value::Array(stems))
+}
+
+async fn voice_swap_swaps(State(state): State<AppState>) -> Json<Value> {
+    Json(serde_json::to_value(state.voice_swap.swaps()).unwrap_or(Value::Array(Vec::new())))
+}
+
+/// Records a conversion and starts it. The file is copied into the swap's
+/// folder before the job is made, so the job never depends on this request.
+async fn voice_swap_start_swap(State(state): State<AppState>, mut multipart: Multipart) -> Result<Json<Value>, (StatusCode, Json<ApiError>)> {
+    let folder = UploadFolder::new()?;
+    let mut source: Option<(String, std::path::PathBuf)> = None;
+    let mut song = String::new();
+    let mut stem = String::new();
+    let mut voice = String::new();
+    let mut pitch = 0i32;
+    let mut index_rate = 0.75f32;
+    let mut protect = 0.33f32;
+    let mut rms_mix = 0.25f32;
+    while let Some(field) = multipart.next_field().await.map_err(|error| api_error(StatusCode::BAD_REQUEST, format!("read the upload: {error}")))? {
+        let name = field.name().unwrap_or_default().to_string();
+        let file_name = field.file_name().map(str::to_owned);
+        match (name.as_str(), file_name) {
+            ("voice", _) => voice = field.text().await.unwrap_or_default(),
+            ("song", _) => song = field.text().await.unwrap_or_default(),
+            ("stem", _) => stem = field.text().await.unwrap_or_default(),
+            ("pitch", _) => pitch = field.text().await.ok().and_then(|text| text.parse().ok()).unwrap_or(0),
+            ("index_rate", _) => index_rate = field.text().await.ok().and_then(|text| text.parse().ok()).unwrap_or(0.75),
+            ("protect", _) => protect = field.text().await.ok().and_then(|text| text.parse().ok()).unwrap_or(0.33),
+            ("rms_mix", _) => rms_mix = field.text().await.ok().and_then(|text| text.parse().ok()).unwrap_or(0.25),
+            (_, Some(file_name)) => {
+                let base = file_name.rsplit(['/', '\\']).next().unwrap_or(&file_name).to_string();
+                let path = folder.0.join(format!("source-{base}"));
+                save_upload(field, &path).await?;
+                source = Some((file_name, path));
+            }
+            _ => {}
+        }
+    }
+    let (name, path) = match source {
+        Some(found) => found,
+        None => {
+            // No upload: take the stem from the library, if one was named.
+            let chosen = song.trim();
+            let stem = stem.trim();
+            if chosen.is_empty() || stem.is_empty() {
+                return Err(api_error(StatusCode::BAD_REQUEST, "no stem in the upload".to_string()));
+            }
+            let known = state
+                .library
+                .list_songs()
+                .map(|songs| songs.into_iter().find(|candidate| candidate.id == chosen))
+                .ok()
+                .flatten();
+            let Some(song) = known else {
+                return Err(api_error(StatusCode::NOT_FOUND, "no such song".to_string()));
+            };
+            if !separation::STEMS.contains(&stem) && !separation::ROFORMER_STEMS.contains(&stem) {
+                return Err(api_error(StatusCode::BAD_REQUEST, format!("unknown stem {stem}")));
+            }
+            let path = stem_path(&state, &song.id, stem);
+            if !path.is_file() {
+                return Err(api_error(StatusCode::NOT_FOUND, "that song has no such stem".to_string()));
+            }
+            (format!("{} - {}", song.title, stem), path)
+        }
+    };
+    if voice.is_empty() {
+        return Err(api_error(StatusCode::BAD_REQUEST, "no voice chosen".to_string()));
+    }
+    if !state.voice_swap.installed() {
+        return Err(api_error(StatusCode::CONFLICT, "the engine is not installed".to_string()));
+    }
+    let swap = state
+        .voice_swap
+        .create_swap(&voice, &name, &path, pitch, index_rate, protect, rms_mix)
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?;
+    let id = swap.id.clone();
+    if let Err(error) = state.voice_swap.convert(&id).await {
+        // The record was only made for this run; a job that never started must
+        // not leave a row saying "running" forever.
+        let _ = state.voice_swap.delete_swap(&id);
+        return Err(api_error(StatusCode::CONFLICT, error.to_string()));
+    }
+    Ok(Json(serde_json::to_value(swap).unwrap_or(Value::Null)))
+}
+
+async fn voice_swap_delete_swap(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>, (StatusCode, Json<ApiError>)> {
+    if state
+        .voice_swap
+        .job()
+        .is_some_and(|job| !job.done && job.kind == "convert" && job.subject == id)
+    {
+        return Err(api_error(StatusCode::CONFLICT, "this swap is still running".to_string()));
+    }
+    state.voice_swap.delete_swap(&id).map_err(|error| api_error(StatusCode::NOT_FOUND, error.to_string()))?;
+    Ok(Json(serde_json::json!({ "deleted": true })))
+}
+
+/// The converted stem, as the page's player reads it.
+async fn voice_swap_swap_audio(State(state): State<AppState>, Path(id): Path<String>, request: Request) -> Result<axum::response::Response, (StatusCode, Json<ApiError>)> {
+    if !voice_swap::valid_id(&id) {
+        return Err(api_error(StatusCode::BAD_REQUEST, "not a swap id".to_string()));
+    }
+    let path = state.voice_swap.swaps_dir().join(&id).join("output.wav");
+    if !path.is_file() {
+        return Err(api_error(StatusCode::NOT_FOUND, format!("read {}: no such file", path.display())));
+    }
+    Ok(serve_audio_file(&path, request).await)
+}
+
+/// The vocal stems the library has, as both tools offer them.
+async fn library_vocal_stems(state: &AppState) -> Vec<Value> {
+    let mut stems: Vec<Value> = Vec::new();
+    let separating = state
+        .separation_run
+        .read()
+        .await
+        .as_ref()
+        .filter(|run| !run.done)
+        .map(|run| run.song_id.clone());
+    if let Ok(entries) = std::fs::read_dir(state.library.media_dir()) {
+        let titles: std::collections::HashMap<String, String> = state
+            .library
+            .list_songs()
+            .map(|songs| songs.into_iter().map(|song| (song.id, song.title)).collect())
+            .unwrap_or_default();
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Some(song_id) = name.strip_suffix("-vocals.wav") else { continue };
+            if separating.as_deref() == Some(song_id) {
+                continue;
+            }
+            let Some(title) = titles.get(song_id) else { continue };
+            stems.push(serde_json::json!({ "song_id": song_id, "title": title, "stem": "vocals" }));
+        }
+        stems.sort_by(|a, b| a["song_id"].as_str().cmp(&b["song_id"].as_str()));
+    }
+    stems
+}
+
+async fn dereverb_status(State(state): State<AppState>) -> Json<Value> {
+    let dereverb = &state.dereverb;
+    Json(serde_json::json!({
+        "installed": dereverb.installed(),
+        "runtime_installed": dereverb.runtime_installed(),
+        "busy": dereverb.busy().await,
+        "job": dereverb.job(),
+    }))
+}
+
+async fn dereverb_install(State(state): State<AppState>) -> Result<Json<Value>, (StatusCode, Json<ApiError>)> {
+    state.dereverb.install().await.map_err(|error| api_error(StatusCode::CONFLICT, error.to_string()))?;
+    Ok(Json(serde_json::json!({ "started": true })))
+}
+
+async fn dereverb_cancel(State(state): State<AppState>) -> Json<Value> {
+    Json(serde_json::json!({ "stopped": state.dereverb.cancel().await }))
+}
+
+async fn dereverb_stems(State(state): State<AppState>) -> Json<Value> {
+    Json(Value::Array(library_vocal_stems(&state).await))
+}
+
+async fn dereverb_jobs(State(state): State<AppState>) -> Json<Value> {
+    Json(serde_json::to_value(state.dereverb.runs()).unwrap_or(Value::Array(Vec::new())))
+}
+
+/// Records a run and starts it. The stem, an upload or a library one, is copied
+/// in first, so the job never depends on the request that made it.
+async fn dereverb_start(State(state): State<AppState>, mut multipart: Multipart) -> Result<Json<Value>, (StatusCode, Json<ApiError>)> {
+    if state.dereverb.busy().await {
+        return Err(api_error(StatusCode::CONFLICT, "a de-reverb job is running".to_string()));
+    }
+    let folder = UploadFolder::new()?;
+    let mut uploaded: Option<(String, std::path::PathBuf)> = None;
+    let mut song = String::new();
+    let mut stem = String::new();
+    while let Some(field) = multipart.next_field().await.map_err(|error| api_error(StatusCode::BAD_REQUEST, format!("read the upload: {error}")))? {
+        let name = field.name().unwrap_or_default().to_string();
+        let file_name = field.file_name().map(str::to_owned);
+        match (name.as_str(), file_name) {
+            ("song", _) => song = field.text().await.unwrap_or_default(),
+            ("stem", _) => stem = field.text().await.unwrap_or_default(),
+            (_, Some(file_name)) => {
+                let base = file_name.rsplit(['/', '\\']).next().unwrap_or(&file_name).to_string();
+                let path = folder.0.join(format!("source-{base}"));
+                save_upload(field, &path).await?;
+                uploaded = Some((base, path));
+            }
+            _ => {}
+        }
+    }
+    let (name, path) = match uploaded {
+        Some(found) => found,
+        None => {
+            let chosen = song.trim().to_string();
+            let stem = stem.trim().to_string();
+            if chosen.is_empty() || stem.is_empty() {
+                return Err(api_error(StatusCode::BAD_REQUEST, "no stem in the upload".to_string()));
+            }
+            let Some(song) = state
+                .library
+                .list_songs()
+                .ok()
+                .and_then(|songs| songs.into_iter().find(|candidate| candidate.id == chosen))
+            else {
+                return Err(api_error(StatusCode::NOT_FOUND, "no such song".to_string()));
+            };
+            if !separation::STEMS.contains(&stem.as_str()) && !separation::ROFORMER_STEMS.contains(&stem.as_str()) {
+                return Err(api_error(StatusCode::BAD_REQUEST, format!("unknown stem {stem}")));
+            }
+            let path = stem_path(&state, &song.id, &stem);
+            if !path.is_file() {
+                return Err(api_error(StatusCode::NOT_FOUND, "that song has no such stem".to_string()));
+            }
+            (format!("{} - {}", song.title, stem), path)
+        }
+    };
+    let run = state
+        .dereverb
+        .create_run(&name, &path)
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?;
+    let id = run.id.clone();
+    if let Err(error) = state.dereverb.run_job(&id).await {
+        let _ = state.dereverb.delete_run(&id);
+        return Err(api_error(StatusCode::CONFLICT, error.to_string()));
+    }
+    Ok(Json(serde_json::to_value(run).unwrap_or(Value::Null)))
+}
+
+async fn dereverb_delete(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>, (StatusCode, Json<ApiError>)> {
+    if state.dereverb.job().is_some_and(|job| !job.done && job.kind == "run" && job.subject == id) {
+        return Err(api_error(StatusCode::CONFLICT, "this run is still going".to_string()));
+    }
+    state.dereverb.delete_run(&id).map_err(|error| api_error(StatusCode::NOT_FOUND, error.to_string()))?;
+    Ok(Json(serde_json::json!({ "deleted": true })))
+}
+
+async fn dereverb_audio(State(state): State<AppState>, Path((id, stem)): Path<(String, String)>, request: Request) -> Result<axum::response::Response, (StatusCode, Json<ApiError>)> {
+    if !voice_swap::valid_id(&id) {
+        return Err(api_error(StatusCode::BAD_REQUEST, "not a run id".to_string()));
+    }
+    if stem != "dry" && stem != "reverb" {
+        return Err(api_error(StatusCode::BAD_REQUEST, format!("unknown stem {stem}")));
+    }
+    let path = state.dereverb.root().join("jobs").join(&id).join(format!("{stem}.wav"));
+    if !path.is_file() {
+        return Err(api_error(StatusCode::NOT_FOUND, format!("read {stem}: no such file")));
+    }
+    Ok(serve_audio_file(&path, request).await)
+}
+
 
 #[cfg(test)]
 mod tests {

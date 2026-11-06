@@ -1,560 +1,61 @@
-<div align="center">
-
-<!-- studio family tabs -->
-[![YuE2 Studio](https://img.shields.io/badge/YuE2_Studio-songs_with_a_score-3f3f46?style=for-the-badge)](https://github.com/timoncool/YuE2-Studio) [![MiniMax Music3 Studio](https://img.shields.io/badge/MiniMax_Music3_Studio-full--length_tracks-3f3f46?style=for-the-badge)](https://github.com/timoncool/MiniMax-Music3-Studio) [![ACE-Step Studio](https://img.shields.io/badge/ACE--Step_Studio-Suno_at_home-ec4899?style=for-the-badge)](https://github.com/timoncool/ACE-Step-Studio)
-
-<img src="docs/logo.png" alt="" width="112" height="112" />
-
 # ACE-Step Studio
 
-**Suno at home: full songs with vocals from ACE-Step 1.5 on your own GPU. One executable — no Python, no Node.js, no launcher.**
+A fork of [timoncool/ACE-Step-Studio](https://github.com/timoncool/ACE-Step-Studio). Upstream is a desktop application that needs a local NVIDIA GPU with 4 GB to 18+ GB of VRAM. This fork runs generation on a headless server on [RunPod](https://runpod.io); the client is a browser tab.
 
-[![Project page](https://img.shields.io/badge/Project_page-timoncool.github.io-7c3aed?style=for-the-badge)](https://timoncool.github.io/ACE-Step-Studio/)
-[![Download](https://img.shields.io/badge/Download-Windows_x64-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/timoncool/ACE-Step-Studio/releases/latest)
-[![Donate](https://img.shields.io/badge/Support-Donate-ff69b4?style=for-the-badge)](DONATE.md)
+## Requirements
 
-[![License](https://img.shields.io/github/license/timoncool/ACE-Step-Studio?style=flat-square)](LICENSE)
-[![Stars](https://img.shields.io/github/stars/timoncool/ACE-Step-Studio?style=flat-square)](https://github.com/timoncool/ACE-Step-Studio/stargazers)
-[![Last commit](https://img.shields.io/github/last-commit/timoncool/ACE-Step-Studio?style=flat-square)](https://github.com/timoncool/ACE-Step-Studio/commits/main)
-[![Downloads](https://img.shields.io/github/downloads/timoncool/ACE-Step-Studio/total?style=flat-square)](https://github.com/timoncool/ACE-Step-Studio/releases)
+- Linux or macOS with `ssh` and `scp`.
+- Node.js 22 and npm.
+- Rust stable. `rust-toolchain.toml` pins the channel.
+- Docker for the first build. It compiles the server and the engine in a container, so no local GPU is involved.
+- A RunPod account with an API key and a persistent Network Volume.
 
-**English** · [Русский](https://timoncool.github.io/ACE-Step-Studio/ru.html) · [中文](https://timoncool.github.io/ACE-Step-Studio/zh.html) · [日本語](https://timoncool.github.io/ACE-Step-Studio/ja.html) · [한국어](https://timoncool.github.io/ACE-Step-Studio/ko.html)
-
-![ACE-Step Studio](docs/screenshots/en-01-create.png)
-
-</div>
-
-ACE-Step Studio is a desktop studio for **ACE-Step 1.5**, the open music model that writes and
-sings full songs. Describe a sound and write lyrics — or give it a one-line idea — and it plans
-the song with its language model and renders it with vocals on your own graphics card. Covers,
-remixes, repaints, a LoRA catalogue, your own LoRA trained on your songs, stems, MIDI, karaoke
-and video clips, all in one window. Windows installer with auto-update or a portable folder, runs
-offline on NVIDIA cards from 4 GB of VRAM.
-
-It is built on [acestep.cpp](https://github.com/ServeurpersoCom/acestep.cpp), the native C++/GGML
-port of ACE-Step 1.5. The studio around it is Rust and React in a Tauri window — nothing in the
-runtime path is Python.
-
-## What changed in 2.0
-
-ACE-Step Studio 1.x was a folder of Python and Node.js: `install.bat` set up Python 3.12,
-PyTorch and Node.js 22 — 7.6 GB of runtime before a single model — and `run.bat` started a
-Gradio backend and an Express server behind a browser tab. 2.0 is a different program on a
-different stack:
-
-| | 1.x | 2.0 |
-|---|---|---|
-| Engine | the Python ACE-Step pipeline on PyTorch | [acestep.cpp](https://github.com/ServeurpersoCom/acestep.cpp), C++ on GGML: CUDA, Vulkan or the processor |
-| Studio | Express + React in a browser tab, Gradio behind it | one executable: Rust service and React UI in a Tauri window |
-| Install | `install.bat` → portable Python, PyTorch, Node.js | an installer that updates itself, or a portable folder |
-| Models | safetensors, XL turbo 7.5 GB in BF16 or 18.8 GB | GGUF quantisations, a whole set from 3.1 GB (Q4) to 18.5 GB (BF16) |
-| Smallest card | 12 GB of VRAM | 4 GB of VRAM |
-| Model choice | 3 XL models | every DiT of ACE-Step 1.5 — 2B and XL, turbo, SFT, base, merges, community fine-tunes — in Q4 to BF16, switched above the create form |
-| Writing | the ACE-Step language model, or OpenRouter | ACE-Step's planner, a local Gemma, OpenRouter, or your own agent over MCP — one writer at a time |
-| LoRA | a file loaded at generation | a curated catalogue, Hugging Face search that reads each file before downloading it, and training your own on the card |
-| Agents | — | an MCP server with 164 tools: an agent does everything the studio does |
-
-How fast, measured on the installed 2.0 on an RTX 4090 with the BF16 set (XL turbo DiT, 4B
-planner), from the request to an MP3 in the library, loading included — the times of the
-samples below:
-
-| Song | Length | Time |
-|---|---|---|
-| Vocals, the planner writes the song's codes first | 2:50–3:10 | 33–36 s |
-| Instrumental, planned the same way | 2:30 | 30 s |
-| Cover of a 3:10 song | 3:10 | 21 s |
-| With a LoRA, rendered from the caption and lyrics alone | 2:40 | 21 s |
-
-Not carried over from 1.x: flow-edit and the "Most Natural" repaint mode, which live in the
-Python pipeline and not in acestep.cpp; the model tools (BF16 converter, model merger, LoRA
-baking); free Pollinations covers — covers now come from an image model on OpenRouter; and
-macOS and Linux — 2.0 is a Windows build, while acestep.cpp itself also runs on Linux and macOS.
-1.x stays available on its [release page](https://github.com/timoncool/ACE-Step-Studio/releases/tag/v1.0.0)
-and in the [Pinokio launcher](https://github.com/timoncool/ACE-Step-Studio-pinokio).
-
-## For AI agents
-
-Given this repository, an agent can set everything up and drive the studio by itself:
-
-1. Install the studio from the [latest release](https://github.com/timoncool/ACE-Step-Studio/releases/latest) and start it.
-2. Connect to its MCP server at `http://127.0.0.1:8792/mcp`:
-   `claude mcp add --transport http ace-step-studio http://127.0.0.1:8792/mcp`
-3. Read the skill it serves (resource `studio://skill`, prompt `studio`), the same text as
-   [docs/mcp-skill.md](docs/mcp-skill.md), and start with the tool `studio_status`.
-
-[llms.txt](llms.txt) says the same for tools that look for it. To keep the skill in Claude
-Code, save [docs/mcp-skill.md](docs/mcp-skill.md) as `~/.claude/skills/ace-step-studio/SKILL.md`.
-
-## What you can do
-
-- **A player of its own** — a ten-band equalizer on Winamp's frequencies with its presets,
-  your own and .EQF files; a MilkDrop visualiser with hundreds of presets or a spectrum in ten
-  looks, over the studio, fullscreen or in its own window; and a Winamp mode that turns the whole
-  window into a skinned Winamp 2 whose windows move apart, dock and resize — the original skin
-  and ten more included, sharp at any scale, the Winamp Skin Museum one click away,
-  Ctrl+M to switch. The song, its place and the equalizer carry over both ways.
-- **Save as, and a Files panel** — songs, stems, MIDI, lyric sheets, scores and videos are
-  saved where you say, in Windows' own Save dialog, and the Files panel shows each save.
-- **A proxy for the whole studio** — HTTP, HTTPS, SOCKS5 or SOCKS4, with a login: model
-  downloads, Hugging Face, OpenRouter and updates go through it.
-- **Full songs from a caption and lyrics** — up to ten minutes, in the languages ACE-Step
-  sings. The planner (ACE-Step's own language model) fills in what you leave out — tempo,
-  key, length, even the lyrics — and plans the song's structure before the DiT renders it.
-- **A song from one line** — the simple form: an idea in, a finished song out. The writing
-  assistant or ACE-Step's planner writes the caption and lyrics, never both at once.
-- **Every ACE-Step 1.5 model** — the standard 2B and the XL DiT, turbo (8 steps), SFT and
-  base (50), shift and continuous variants, merges and community fine-tunes, in Q4 to BF16
-  and MXFP4; planners of 0.6B, 1.7B and 4B. The DiT is switched above the create form; a
-  missing one downloads and takes over when it is there.
-- **Covers, remixes and repaints** — take a track from your library and render it in a new
-  style (with how closely it follows), remix it, repaint a stretch of it, or, with a base
-  model, extract one stem, add stems or complete a track. A reference track lends its timbre.
-- **Exact replay** — every track keeps its request and its audio codes, so it can be
-  re-rendered bit for bit, or with other steps, a new seed, several takes, or another format.
-- **200 ready examples** — ACE-Step's own example requests, one click to load.
-- **Every engine setting** — steps, guidance and its eight modes, shift, solver and
-  scheduler, the planner's temperature, CFG, top-p and top-k, both seeds, the plan strength
-  (how many DiT steps follow the planner's audio codes), lossless FLAC or MP3.
-- **A writing assistant** — a local Gemma model, OpenRouter, or your connected agent writes
-  the caption and lyrics from an idea by ACE-Step's official songwriting rules. Lyrics you
-  wrote yourself get their section tags with one button, the words exactly as you wrote them.
-- **LoRA** — a catalogue of 131 LoRA picked from Hugging Face by likes and downloads, each
-  described in five languages and credited to its author, and a search of everything Hugging
-  Face has for ACE-Step, most liked first. Before a file downloads the studio reads its header
-  and says which model size it fits (2B or XL) or why the engine cannot use it. A LoRA of the
-  sound turns the planner's audio codes off, as ACE-Step's authors advise.
-- **Train your own LoRA** — songs of one artist or style become a LoRA on your own card
-  with HOT-Step's trainer and its recipe (LoKR, Prodigy, a stop at a target loss that keeps
-  the best adapter). Every setting of the recipe is editable, and each checkpoint goes into
-  the LoRA library in one click.
-  - **A three-step wizard** — drop a folder of songs, check them, train. Albums with a cue
-    sheet are cut into songs; titles and artists come from the tags, the file name and the
-    folders.
-  - **Preparation on its own** — lyrics come from the lyric databases players use (LRCLIB,
-    QQ Music, Kugou), word for word; only a song none of them knows has its vocals separated
-    and is heard by CrisperWhisper. MOSS-Music listens to every song and describes it, with the
-    tempo and key measured.
-  - **Train further** — not there yet? Set more epochs and the run goes on from the adapter
-    it left, with the same recipe, songs and model.
-- **Word-level karaoke** — enhanced LRC with a timestamp on every word, aligned by Parakeet
-  or CrisperWhisper 2.0 turbo (in audio.cpp). Your lyrics are kept; only the timing is borrowed.
-- **Six stems on the GPU** — drums, bass, other, vocals, guitar and piano with HT-Demucs.
-- **Any track to MIDI** — a song, a stem or a processed take becomes multi-instrument MIDI
-  with MuScriptor on the GPU, through HOT-Step's native port. A piano roll fills in while it
-  listens; play it against the original, mute or solo an instrument, save the .mid.
-- **Audio processing** — noise reduction, the Spectral Lifter, a vocal naturaliser, your own
-  VST3 plugins in a chain, and mastering to a reference track. Compare before and after while
-  it plays, then keep the result as a version of the track or throw it away.
-- **Video clips** — a visualiser editor with presets, effects, text layers and karaoke
-  lyrics, rendered to MP4 with the bundled ffmpeg.
-- **Driven by your agent (MCP)** — Claude Code, Claude Desktop or Cursor do everything the
-  studio does, and see and work its window.
-- **A library of plain files** — search, playlists, versions, cover art from prompt
-  templates, tracks with title, lyrics and cover in their own tags (Vorbis comments in a FLAC,
-  ID3 in an MP3). Interface in English, Russian,
-  Chinese, Japanese and Korean.
-- **A cover for every track** — a track without one wears a free (CC0) Wikimedia Commons
-  photograph that fits the genres, moods and instruments of its style, a pattern in one of 21
-  DiceBear styles, or a cover OpenRouter generates for every new track. It is chosen by the
-  track's seed, so it stays the same, a stem wears its song's, and it is written into the
-  track's tags, so players show it after the download.
-- **One picture window** — for a cover, and for the background and centre of a music video:
-  Commons photographs by search starting from the scenes a style calls up, clips free of
-  copyright for a background, the track's pattern in any style, generation through
-  OpenRouter, or a file of your own. No keys, no stock-site accounts.
-- **Music videos** — a visualiser video of any track in 16:9, 9:16 or 1:1, with karaoke
-  lyrics, text layers and effects, rendered to MP4 on your machine.
-- **Activity** — a log in the sidebar of every change a connected agent makes and every
-  message the studio shows.
-- **Likes, sorting and stems in order** — a like is kept with the song for every window and
-  agent, every list sorts by date, title or length, and a song's stems fold under it.
-- **Melodic variation** — under the language model's settings, a penalty on the audio codes it
-  repeated lately, counted by presence, by frequency or DRY, keeps a melody from looping; 1.00 is off.
-- **Around every song** — a note of your own on each song, its parameters sent back to the form,
-  shown as JSON or saved to a file; the engine's stage, step and time left on the card while it
-  renders; video export from 1080p to 240p with AAC from 128 to 320 kbps; quitting while a song is
-  made asks first, and a song the studio was closed on starts again; karaoke can recognise words
-  with Parakeet Ultra, Moondream's fine-tune of Parakeet.
-
-## Compose and edit MIDI
-
-The embedded Signal editor has multiple tracks, instruments, drums, MIDI keyboard recording, tempo changes, editable chord symbols and section markers. Save a new composition as MIDI and rendered audio in the library, or update an existing track’s MIDI. SoundFonts are bundled locally; the editor sends no analytics.
-
-A MIDI track can also be sent to cover mode.
-
-## Screenshots
-
-![The MIDI editor: chords, sections and notes](docs/screenshots/en-16-midi-editor.png)
-
-![Melodic variation: a penalty on the codes the language model repeated lately](docs/screenshots/en-17-melodic-variation.png)
-
-| | |
-|---|---|
-| ![The equalizer and MilkDrop](docs/screenshots/en-13-listen.png) | ![The Winamp mode](docs/screenshots/en-14-winamp.png) |
-| The equalizer with its curve and MilkDrop over the studio, as the song plays | The whole window as Winamp 2: equalizer, playlist and MilkDrop, skinned |
-| ![The simple form](docs/screenshots/en-02-simple.png) | ![A finished track](docs/screenshots/en-03-track.png) |
-| The simple form — one line in, a whole song planned and rendered | A finished track with its lyrics, ready to replay, cover or repaint |
-| ![The model switcher](docs/screenshots/en-04-models.png) | ![The LoRA catalogue](docs/screenshots/en-05-lora.png) |
-| The model switcher — every DiT of ACE-Step 1.5 in Q4 to BF16 and MXFP4, what is on disk | The LoRA catalogue — 131 LoRA, each credited to its author and marked 2B or XL |
-| ![Hugging Face search](docs/screenshots/en-06-huggingface.png) | ![A dataset](docs/screenshots/en-07-dataset.png) |
-| Hugging Face search — every file checked for the model size it fits before it downloads | A dataset — songs from the library with their lyrics and captions |
-| ![Training your own LoRA](docs/screenshots/en-08-training.png) | ![Any track to MIDI](docs/screenshots/en-09-midi.png) |
-| Your own LoKR trained on the card — the loss as it learns, the best epoch into the library | Any track to MIDI — a piano roll of every instrument, played against the original |
-| ![Audio processing](docs/screenshots/en-10-processing.png) | ![Agent over MCP](docs/screenshots/en-11-agent.png) |
-| Audio processing — noise reduction, the Spectral Lifter, VST3, mastering to a reference | An agent over MCP — the address and the lines to paste into Claude Code or any client |
-| ![Models and quantisations](docs/screenshots/en-12-settings.png) | |
-| Settings — ready-made sets and one quantisation per role, and finding files again | |
-
-The same screens in the language you read: [Русский](https://timoncool.github.io/ACE-Step-Studio/ru.html),
-[中文](https://timoncool.github.io/ACE-Step-Studio/zh.html), [日本語](https://timoncool.github.io/ACE-Step-Studio/ja.html),
-[한국어](https://timoncool.github.io/ACE-Step-Studio/ko.html) — on the project page, or in
-[docs/screenshots](docs/screenshots).
-
-## Samples
-
-Made in the released build on an RTX 4090 with the BF16 set, nothing edited afterwards.
-Listen in the browser on the [project page](https://timoncool.github.io/ACE-Step-Studio/#samples)
-or download the MP3s from [docs/samples](docs/samples).
-
-| Song | How it was made | Style |
-|---|---|---|
-| [Neon Harbor](docs/samples/neon-harbor.mp3) | English synth-pop from a caption and lyrics | 80s synth-pop, warm female vocal, analog arpeggios, gated reverb snare, 118 BPM |
-| [Дорога домой](docs/samples/doroga-domoy.mp3) | Russian folk rock with accordion | Russian folk rock, raspy male vocal, accordion hooks, galloping bass, 142 BPM |
-| [夜の電車](docs/samples/yoru-no-densha.mp3) | Japanese city pop | city pop, airy female vocal, electric piano, slap bass, brass stabs, 104 BPM |
-| [Fuego lento](docs/samples/fuego-lento.mp3) | Latin pop in Spanish | latin pop, warm male vocal, nylon guitar, congas, piano montuno, 96 BPM |
-| [Midnight Drive](docs/samples/midnight-drive.mp3) | An instrumental | instrumental synthwave, analog bass arpeggios, gated drums, lush pads, 100 BPM |
-| [Classic lo-fi hip-hop instrumental](docs/samples/one-line.mp3) | One line in the simple form; ACE-Step's planner wrote the caption, tempo and key | one line: a warm lo-fi beat for a rainy night drive, dusty drums and mellow electric piano |
-| [Neon harbor, call my name](docs/samples/neon-harbor-cover.mp3) | Cover of the first song as an acoustic ballad | acoustic ballad, breathy female vocal, fingerpicked guitar, gentle piano |
-| [Night Rider](docs/samples/night-rider-lora.mp3) | With the Synthwave XL LoRA from the catalogue | roti-s1nthwv, driving synthwave, powerful male vocal, pulsing analog bass, 118 BPM |
-
-## What it needs
-
-- Windows 10/11 x64.
-- A GPU with **4 GB of VRAM** or more for the smallest set; the studio recommends the set your card runs best:
-  - **NVIDIA**, from the GTX 900 series on, runs on CUDA — the fastest path. The studio
-    ships two CUDA builds of the engine and picks the one your card and driver run:
-    CUDA 13 for Turing and newer (GTX 16, RTX 20–50) with driver 580 or newer, CUDA 12 for
-    Maxwell, Pascal and Volta and for any card on a driver from 525 to 579.
-  - **AMD or Intel — untested.** The engine carries a Vulkan backend for them; reports from
-    owners are welcome.
-  - Without a GPU the engine falls back to the processor, which works but is many times
-    slower.
-- 3.1–18.5 GB of disk for one model set.
-- Training a LoRA (optional): an NVIDIA RTX 30-series card or newer (it trains in BF16). A LoKR
-  on the XL DiT took 19.4 GB of the RTX 4090's 24 GB here, 20 epochs on five songs in 67 s;
-  HOT-Step, whose trainer the studio runs, trains the XL on cards with 12 GB. The unquantised DiT it
-  trains on (4.5 GB for the 2B, 9.3 GB for the XL) and the trainer (0.1 GB) download only when
-  you train. Describing songs by ear needs about 12 GB of VRAM and 9.8 GB more disk for
-  MOSS-Music; without it the captions are written by hand.
-
-### Linux (experimental)
-
-The .deb and the AppImage for Linux x86-64 are **experimental**. They come from the same code with the
-Linux build of the same engine (Vulkan, and the processor), but the author works on Windows and has not
-run them on a real Linux desktop. **If you live on Linux, it would be great if you polished them and sent
-the fixes back as a pull request.** The studio keeps its data in `~/.local/share/ace-step-studio`
-(`$XDG_DATA_HOME`).
-
-## What runs where
-
-| Part | NVIDIA | AMD, Intel | No graphics card |
-| --- | --- | --- | --- |
-| Making songs · acestep.cpp | CUDA | Vulkan | processor |
-| Training a LoRA · music-train | CUDA | not available | not available |
-| Style by ear · MOSS-Music | CUDA | processor | processor |
-| Tempo and key · Beat This!, S-KEY | CUDA | DirectML | processor |
-| Stems · HT-Demucs | CUDA | processor | processor |
-| Karaoke timing · Parakeet | CUDA | Vulkan | processor |
-| Karaoke timing · CrisperWhisper | CUDA | Vulkan | processor |
-| Writing assistant · llama.cpp | CUDA | Vulkan | processor |
-| Audio to MIDI · MuScriptor | CUDA | processor | processor |
-
-**The paths for AMD and Intel cards (Vulkan, DirectML) and work on the processor are
-experimental:** they exist for computers where the studio would not run at all otherwise.
-The main, tested path is an NVIDIA card.
-
-- Training needs an NVIDIA card with 12 GB of video memory or more. The trainer has no other
-  path, and on the processor one run would take days, so on any other machine the studio
-  does not offer the training files.
-- On AMD and Intel cards stems are separated on the processor: the HT-Demucs model does not
-  run through DirectML (out of memory on a 2 GB integrated card, over 20 GB and minutes for
-  30 seconds of audio on a 24 GB one).
-- Karaoke's Parakeet runs on transcribe.cpp, the engine Dub Studio and Speech Studio use: its
-  CUDA build on an NVIDIA card with a CUDA 13 driver (on Linux when the system has CUDA 13's
-  cuBLAS), its Vulkan build on any other card, its processor build without one; on a Mac, Metal
-  on Apple silicon and the processor on Intel. The tempo and key models reach any DirectX 12 card through
-  DirectML, whose runtime comes with karaoke's card path.
-- "Auto" in a device choice takes the card when its runtime is installed, and the processor
-  otherwise. The same table is in the studio, under Settings → Models.
-
-## Quick start
-
-1. **Install** — run `ACE-Step.Studio_x.y.z_x64-setup.exe` from the
-   [latest release](https://github.com/timoncool/ACE-Step-Studio/releases/latest), or unzip the
-   portable archive anywhere and run `ACE-Step-Studio.exe`.
-2. **Choose a model set** — the first screen preselects the set your card can run. Press
-   download; it fetches only what is missing and resumes if interrupted.
-3. **Create** — describe the sound and write lyrics, load one of the examples, or type one
-   line in the simple form, and press Create. The engine starts by itself and the song lands
-   in your library.
-
-Everything the studio owns stays in its own folder: models, songs, settings, logs,
-temporary files and the WebView2 profile, beside `ACE-Step-Studio.exe`. That holds for the
-portable archive and for an installation into any folder the studio can write to; deleting
-the folder removes the studio. Only an installation into a read-only location such as
-Program Files falls back to `%LOCALAPPDATA%\ACE-Step Studio`. The installed version updates
-itself: a new release is offered inside the studio and installed in place.
-
-**If the installer stops on WebView2.** The studio's window runs on Microsoft Edge WebView2,
-and the installer fetches it when Windows lacks it. On a blocked or unsteady connection, or on
-Windows 10 builds that refuse Microsoft's small bootstrapper (error 0x80040902), that fetch
-fails and the installer says so. Install WebView2 from Microsoft's standalone installer,
-[Evergreen Standalone x64](https://go.microsoft.com/fwlink/p/?LinkId=2124701), then run the
-studio's installer again.
-
-## Drive it from an agent (MCP)
-
-While the studio is open it serves MCP at `http://127.0.0.1:8792/mcp`: an agent such as
-Claude Code, Claude Desktop or Cursor does everything the page does, through the same code —
-songs, covers and repaints, ACE-Step's planner, the library, stems, MIDI, karaoke,
-processing, video clips, the player, LoRA from the catalogue or Hugging Face, and a LoRA
-from a folder of songs end to end — and sees and works the window itself: a screenshot, its
-controls, clicks and typing. 164 tools, grouped by area. ACE-Step's writing rules and
-official examples come with the server, so the agent writes the captions and lyrics itself.
-
-With **Agent (MCP)** chosen as the writing assistant (Settings, Models), the connected agent
-also answers the studio's own write buttons, the simple form and dataset preparation.
-Settings, **Agent (MCP)** shows whether an agent is connected and what to paste.
+## Quickstart
 
 ```bash
-claude mcp add --transport http ace-step-studio http://127.0.0.1:8792/mcp
+cargo run --release -p launcher
 ```
 
-[docs/mcp-skill.md](docs/mcp-skill.md) is the skill an agent reads: every tool, what the
-model expects, and step-by-step recipes.
+1. `n` creates a pod. The network volume you pick fixes its region and mounts at `/workspace`.
+2. `b` builds the server and `e` builds the engine and the Linux MIDI tools, once per checkout. `P` uploads the full bundle; `p` pushes only the server after it changes.
+3. `Enter` opens the tunnel. `w` starts the web dev server and `o` opens `http://localhost:3000`.
 
-## Models
+Press `?` in the launcher for the other keys.
 
-A runnable ACE-Step installation is four files: the **DiT** (renders the sound), the
-**planner** (the 5 Hz language model that writes and plans), the **text encoder** and the
-**VAE**.
+## How it works
 
-| Your GPU | Set | Download |
-| --- | --- | --- |
-| 24 GB VRAM | Full native — XL turbo BF16, planner 4B BF16 | 18.5 GB |
-| 13 GB and above | Quality — XL turbo Q8_0, planner 4B Q8_0 | 10.1 GB |
-| 10 GB and above | Balanced — XL turbo Q6_K, planner 1.7B | 6.7 GB |
-| 8 GB and above | Light — XL turbo Q4_K_M, planner 1.7B | 5.7 GB |
-| 4 GB and above | Minimal — 2B turbo Q4_K_M, planner 0.6B | 3.1 GB |
+The tunnel forwards a local port to `127.0.0.1:8792` on the pod, encrypted over RunPod's SSH port. The local port defaults to 8792, and `c` changes it. No web port is exposed.
 
-The studio detects your card and preselects the set, but the download is always your
-decision. Any other DiT — SFT, base, the shift and continuous turbos, the XL merges, MXFP4,
-and mdmachine's community Regrind fine-tune with its retrained VAE decoders — is one click in
-the switcher above the create form or in Settings, Models, which also builds a custom mix
-role by role.
+Weights, audio caches and your library stay on the volume under `/workspace`. The bottom bar shows balance, VRAM, CPU and RAM. `x` stops the pod and ends GPU billing.
 
-The files come from [Serveurperso/ACE-Step-1.5-GGUF](https://huggingface.co/Serveurperso/ACE-Step-1.5-GGUF)
-(pinned to `666ac70`), [scragnog's merges](https://huggingface.co/scragnog/ace-step-1.5-gguf-merge-models),
-[MXFP4 quants](https://huggingface.co/scragnog/Ace-Step-1.5-MXFP4-Quants) and
-[ScragVAE](https://huggingface.co/scragnog/Ace-Step-1.5-ScragVAE), and
-[mdmachine/ACEStep-XL-Regrind-V1](https://huggingface.co/mdmachine/ACEStep-XL-Regrind-V1), each
-pinned to a revision and checked by size and SHA-256. They are written to, and can be dropped
-into by hand at:
+## Python runtime
 
-- `<the studio's folder>\data\models\acestep-cpp\` — the portable folder, or the folder
-  you installed into
-- `%LOCALAPPDATA%\ACE-Step Studio\models\acestep-cpp\` — only for an installation into a
-  read-only location
+**Settings → Python runtime** installs the environment the Python tools share: Python 3.12 and torch, about 8 GB, and ten to twenty minutes on the network volume, once. It is not part of any one tool. A tool adds only its own loader and model on top, and a pod restart never reinstalls it.
 
-A file placed by hand with the exact catalogue name is recognised and never downloaded again;
-**Find models and LoRA again** (Settings, Models, or the LoRA page) makes the running engine
-see files put there while it runs. Downloads made by the studio are found on their own.
+## Misc
 
-## The engine and the DLLs it needs
+The tools that are not part of making a song live under **Misc** in the sidebar. They get their own list, their own history, and no say in how a song is made. Voice swap and De-reverb are there now; the next tool goes beside them.
 
-```text
-ace-server.exe → ggml.dll, ggml-base.dll            shipped inside the app
-  loads at run time, whichever the machine can use:
-  ├─ ggml-cuda.dll     → cublas64_13.dll, cublasLt64_13.dll (downloaded once), nvcuda.dll (NVIDIA driver)
-  ├─ ggml-vulkan.dll   → vulkan-1.dll (every AMD, Intel and NVIDIA driver)
-  └─ ggml-cpu-*.dll    builds from SSE4.2 to AVX-512; the best one for the processor is picked
-  + msvcp140, vcruntime140, vcruntime140_1, vcomp140   Visual C++ runtime, shipped app-local
-```
+### Voice swap
 
-**Shipped inside the app.** `ace-server.exe`, every `ggml*.dll`, built from the pinned
-acestep.cpp commit (`engines/engine-source.json`) with all backends, and the Visual C++
-runtime it needs live in `resources\engine\` beside the main executable. Nothing is
-installed into Windows.
+Trains a voice from your recordings and sings a vocal stem in it. Recordings are a draft until training has made a model. Once a run succeeds they are deleted, and the voice keeps the minutes it was trained on along with one 55 MB model per saved checkpoint. A long run leaves many. **Clean up** keeps the ones you tick and deletes the rest. A swap takes an uploaded stem or a vocal stem already separated in the library, and writes a WAV into the tool's own history. No song is created or changed.
 
-**Downloaded once, on the first engine start — on NVIDIA only.**
+Everything lives under `/workspace/ace-step-studio/data/voice-swap`, so models and results survive the pod. Training needs an NVIDIA card; a conversion can fall back to the processor. The pinned RVC commit is in `engines/rvc-source.json`.
 
-| File(s) | Where from | Size | Why |
-| --- | --- | --- | --- |
-| `cublas64_13.dll`, `cublasLt64_13.dll` | NVIDIA's redistributable [`libcublas-windows-x86_64-13.5.1.27-archive.zip`](https://developer.download.nvidia.com/compute/cuda/redist/libcublas/windows-x86_64/libcublas-windows-x86_64-13.5.1.27-archive.zip) | 391 MB (zip) | The CUDA linear algebra `ggml-cuda.dll` is linked against; too large, and under NVIDIA's licence, to bundle. |
-| `cublas64_12.dll`, `cublasLt64_12.dll` | [`libcublas-windows-x86_64-12.9.1.4-archive.zip`](https://developer.download.nvidia.com/compute/cuda/redist/libcublas/windows-x86_64/libcublas-windows-x86_64-12.9.1.4-archive.zip) | 550 MB (zip) | Only for the CUDA 12 build: older cards and drivers. |
+### De-reverb
 
-A machine with the CUDA toolkit already has cuBLAS on its `PATH` and downloads nothing.
+One model, `UVR-DeEcho-DeReverb` (214 MB): a vocal stem in, the dry take and the reverb that was removed out, both kept beside the run in the history. It takes out the room a generator baked into a vocal, the part a separator cannot help with, and which a voice model otherwise learns.
 
-## Architecture
+It runs through `audio-separator` in the shared Python environment, so it adds a loader and a model rather than another interpreter. None of the models makes a wet vocal dry, so a dry recording still beats any of them.
 
-```text
-React UI ─┐
-          ├─ ACE-Step-Studio.exe   (Tauri window + Rust/Axum service on 127.0.0.1:8792)
-Rust axum ┘        │
-                   ├─ acestep.cpp `ace-server`   (C++/GGML, GGUF, 127.0.0.1:8089)
-                   ├─ music-train.exe            (HOT-Step ace-train, LoRA training, optional)
-                   └─ vst-host.exe               (HOT-Step VST3 host, a process of its own)
-```
+## Stems
 
-The service is compiled into the desktop binary. It supervises the engine process, restarts
-it when you switch models, and imports finished songs itself, so a result is never lost if
-the window was reloaded or closed mid-generation. Progress is read from the engine: the
-planner's tokens, the DiT's steps, decoding.
+HT-Demucs runs in the service and leaves six stems. Mel-Band RoFormer leaves the vocals and the instrumental, and BS-RoFormer SW leaves six sources from one mask. Both run on the BSRoformer.cpp build the studio downloads, on the pod's card. Choose the separator under Settings → Models → Stems.
 
-## Building from source
+## Building the binaries
 
-```powershell
-npm --prefix app install
-npm --prefix desktop install
-cargo test --workspace
-npm --prefix app test
-```
+No binaries are shipped prebuilt, so the first deployment compiles them: `b` and `e` run `runpod/build-server.sh` and `runpod/build-engine.sh`. Afterwards they live in `/workspace/ace-step-studio/bin` on the volume, and later sessions only reconnect.
 
-Developing the UI against a running service:
+The engine build is the slow one. It clones the commit pinned in `engines/engine-source.json`, compiles the CUDA 12.8 backend and every processor generation from Turing to Blackwell unless you narrow `CUDA_ARCH`, and then builds the Linux `music-midi` and `music-caption` with the repo's own script. The downloadable HOT-Step pack is a Windows build. `JOBS` (default 4) sets parallel compile jobs.
 
-```powershell
-cargo run -p music-server           # service on 127.0.0.1:8792
-npm --prefix app run dev            # UI on 127.0.0.1:3000
-```
-
-The engine: `scripts/build-engine-runtime.ps1 -RuntimeBackend cuda -CudaArchitecture universal`
-builds the pinned acestep.cpp commit with runtime-loaded CUDA 13 and CUDA 12, Vulkan and CPU
-backends, using the CUDA toolkits, the Vulkan SDK, MSVC and Ninja.
-`scripts/build-release.ps1 -Version X.Y.Z` produces the NSIS installer, the portable archive
-and the signed `latest.json` for the updater; it reads the signing key from
-`TAURI_SIGNING_PRIVATE_KEY` or `%USERPROFILE%\.tauri\ace-step-studio.key`. Model weights are
-never part of a release.
-
-### macOS and Linux
-
-Linux packages are built on the release machine in an Ubuntu 22.04 container (glibc 2.35; Docker, under WSL on
-Windows): `scripts/build-linux-docker.sh <output folder>` builds the committed HEAD with
-`scripts/build-release-linux.sh` and checks that the engine starts. Only the .dmg is built on GitHub, by
-the `macOS build` workflow (`.github/workflows/release-unix.yml`, started by hand, optionally with a
-release tag to attach it to): there is no Mac on the release machine.
-
-On macOS (Xcode command line tools and CMake), the engine is built from the pinned commit with
-Metal, and again whenever `engines/engine-source.json` moves to a new commit:
-
-```bash
-scripts/build-engine-runtime.sh ~/ace-engine           # builds the pinned commit with Metal
-STUDIO_ENGINE_ROOT=~/ace-engine cargo run -p music-server
-scripts/build-release-macos.sh                         # the .dmg, engine and Audio to MIDI inside
-```
-
-Audio to MIDI is Windows-only as a download; on macOS `scripts/build-midi-runtime.sh <dir>`
-builds HOT-Step's `ace-midi` with Metal (point `STUDIO_MIDI_BIN` at the resulting `music-midi`;
-the dmg bundles it).
-
-On Linux (CMake, Ninja, the Vulkan headers and `glslc`), `scripts/build-engine-runtime-linux.sh <dir>`
-builds `ace-server` with Vulkan and a processor build of ggml for every CPU generation, its
-libraries found beside it; `scripts/build-release-linux.sh` makes the .deb and the AppImage.
-
-`STUDIO_ENGINE_ROOT` (or `STUDIO_ENGINE_BIN`, the path of `ace-server` itself) tells the studio
-where the engine is. `Auto` lets the engine choose its device, Metal on a Mac and Vulkan on
-Linux, and falls back to the processor. On macOS the studio keeps its data in
-`~/Library/Application Support/ACE-Step Studio`.
-
-## Anonymous statistics and news
-
-The studio asks the author's server for news at start and then every hour. The request carries no id, so news
-arrive whatever you choose below: new items appear on top of the News page or as a strip across the top of the window,
-and with no connection the studio shows the news of its release.
-
-The setup screen of the first start has a checkbox **Send anonymous usage statistics**, checked by default. The same
-switch is in Settings → Anonymous statistics, next to **What is sent** (the exact report of today) and **New install
-id**. While it is checked, the studio sends a day's report a minute after start, every six hours, two minutes after
-work ends and when it closes (a later report of the same day replaces the earlier one):
-
-- a random install id made on this computer, not tied to the hardware or an account; unchecking the box deletes it;
-- the studio and its version, the OS name and version, the window language;
-- the graphics card as vendor, a video memory bucket (up to 8, 12, 16, 24+ GB) and the backend (CUDA, Vulkan or
-  processor);
-- how many songs were made, failed or were cancelled that day, and the model sets they were made on: a ready-made
-  set by name with its parts, one put together by hand by its parts, each with its number of songs;
-- why a song failed, as one line with paths, names, links and anything in quotes removed on this computer before it
-  leaves; the server keeps these reasons 30 days.
-
-Never: lyrics, prompts, audio, file names or paths, anything personal. The server keeps the country Cloudflare
-reports for the connection, not the IP address. `DO_NOT_TRACK=1` or `STUDIO_TELEMETRY=0` in the environment turns
-statistics off entirely: no id exists and nothing is counted.
-
-## Other Projects by [@timoncool](https://github.com/timoncool)
-
-| Project | Description |
-|---------|-------------|
-| [YuE2 Studio](https://github.com/timoncool/YuE2-Studio) | The same studio on YuE2 — songs with an editable score |
-| [MiniMax Music3 Studio](https://github.com/timoncool/MiniMax-Music3-Studio) | The same studio on MiniMax Music 3 |
-| [Speech Studio](https://github.com/timoncool/speech-studio) | Offline voice studio — text-to-speech, voice cloning, speech recognition |
-| [telegram-api-mcp](https://github.com/timoncool/telegram-api-mcp) | Full Telegram Bot API as an MCP server |
-
-## Authors
-
-- **Nerual Dreming** — [Telegram](https://t.me/nerual_dreming) | [neuro-cartel.com](https://neuro-cartel.com) | [ArtGeneration.me](https://artgeneration.me)
-- **Нейро-Софт** — [Telegram](https://t.me/neuroport) | portable neural networks
-
-## Acknowledgements
-
-- The [ACE-Step team](https://github.com/ace-step) for ACE-Step 1.5, its models and its songwriting guide.
-- [Serveurperso](https://github.com/ServeurpersoCom) for acestep.cpp and the GGUF conversions.
-- [scragnog](https://github.com/scragnog) for [HOT-Step-CPP](https://github.com/scragnog/HOT-Step-CPP): the LoRA trainer and its recipe, the captioner, the MIDI transcription port, the VST3 host, the merges, MXFP4 quants and ScragVAE, and the noise reduction, Spectral Lifter and mastering designs the studio's audio processing is ported from.
-- [mdmachine](https://huggingface.co/mdmachine) for the Regrind XL fine-tune and its VAE decoders.
-- [sergree](https://github.com/sergree) for [matchering](https://github.com/sergree/matchering), and [jeankassio](https://github.com/jeankassio) for the vocal naturalizer in [ComfyUI_MusicTools](https://github.com/jeankassio/ComfyUI_MusicTools).
-- The authors of the LoRA in the catalogue, each credited and linked on its card.
-- [fspecii](https://github.com/fspecii/ace-step-ui) for the ACE-Step UI that 1.x grew from.
-- The [LAME](https://lame.sourceforge.io) project for the MP3 encoder, [Xiph.Org](https://xiph.org/flac/) for libFLAC, the FLAC encoder, and [Serial-ATA](https://github.com/Serial-ATA/lofty-rs) for lofty, which writes the tags.
-- [crmne](https://github.com/crmne) for [Spotifast](https://github.com/crmne/spotifast) (MIT): the equalizer solves its band gains as its `eq.rs` does.
-- [Jordan Eldredge](https://github.com/captbaritone) and the Webamp team for [Webamp](https://github.com/captbaritone/webamp) (MIT), which the Winamp mode runs, and for the [Winamp Skin Museum](https://skins.webamp.org). Winamp and its base skin are Nullsoft's.
-- [Jordan Berg](https://github.com/jberg) for [Butterchurn](https://github.com/jberg/butterchurn) and [butterchurn-presets](https://github.com/jberg/butterchurn-presets) (MIT), MilkDrop in the browser. MilkDrop itself is Ryan Geiss's, and each preset is its author's, named in its title.
-- [Henrique Vianna](https://github.com/hvianna) for [audioMotion-analyzer](https://github.com/hvianna/audioMotion-analyzer) (AGPL-3.0), the spectrum looks of the visualiser.
-- [Borewit](https://github.com/Borewit) for [music-metadata](https://github.com/Borewit/music-metadata) (MIT) and [Stuart Knightley](https://github.com/Stuk) for [JSZip](https://github.com/Stuk/jszip) (MIT), which read tracks and skins in the Winamp mode.
-- The authors of the skins that come with the studio: Winamp's base skin 2.91 (Nullsoft); Winamp5 Classified (Sven Kistner, Zarko Jovic, GuidoD, Wildrose-Wally); Winamp3 Classified (Steve Gedikian, John Slegers, PeterPan, Wildrose-Wally); Bento Classified and Internet Archive (LuigiHann); Mac OS X 1.5 Aqua (DeeLight); TopazAmp (Kelly McLarnon); Vizor (ViDA); Zaxon Remake (Daniel Jansson); Green Dimension V2 (its author, who signs the readme in ASCII art); XMMS Turquoise (from the XMMS project). Each skin keeps its own readme inside the .wsz.
-- [Wikimedia Commons](https://commons.wikimedia.org) and the photographers and filmmakers who give their work to it under CC0 or into the public domain, many of them through [Unsplash](https://unsplash.com): the pictures and clips a track and its video can wear. A chosen picture keeps a link to its page.
-- [Florian Körner](https://github.com/FlorianKoerner) for [DiceBear](https://www.dicebear.com) (MIT) and the authors of its CC0 styles, the patterns a track without a cover wears, and the [resvg](https://github.com/linebender/resvg) authors, whose renderer writes them into the track as PNG.
-- [MRafStudio](https://github.com/MRafStudio) for the ideas of [pull request #34](https://github.com/timoncool/YuE2-Studio/pull/34): the Activity log, sorting, likes kept in the library and stems under their song.
-- [stalexxx](https://github.com/stalexxx) for the macOS port of [YuE2 Studio pull request #51](https://github.com/timoncool/YuE2-Studio/pull/51), the service on macOS with Metal that this studio follows, and [SkySlider](https://github.com/SkySlider) for the Linux pieces from SkySlider's fork of YuE2 Studio: adapter detection and the parent-death signal.
-
-- [ryohey](https://github.com/ryohey) for [Signal](https://github.com/ryohey/signal) (MIT), built from [the studio fork](https://github.com/timoncool/signal/tree/studio), and Milton Paredes for the bundled A320U SoundFonts (GPL-2.0). License notices are kept in [licenses](licenses).
-
-## Support the Author
-
-I build open-source software and do AI research. Most of what I create is free and available to everyone. Your donations help me keep creating without worrying about where the next meal comes from =)
-
-**[All donation methods](DONATE.md)** · [Русский](DONATE.ru.md) · [中文](DONATE.zh.md) · [日本語](DONATE.ja.md) · [한국어](DONATE.ko.md) | **[dalink.to/nerual_dreming](https://dalink.to/nerual_dreming)** | **[boosty.to/neuro_art](https://boosty.to/neuro_art)**
-
-- **BTC:** `1E7dHL22RpyhJGVpcvKdbyZgksSYkYeEBC`
-- **ETH (ERC20):** `0xb5db65adf478983186d4897ba92fe2c25c594a0c`
-- **USDT (TRC20):** `TQST9Lp2TjK6FiVkn4fwfGUee7NmkxEE7C`
-
-## Star History
-
-<a href="https://github.com/timoncool/ACE-Step-Studio/stargazers">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="docs/stars-dark.svg" />
-   <source media="(prefers-color-scheme: light)" srcset="docs/stars-light.svg" />
-   <img alt="Star history chart" src="docs/stars-light.svg" />
- </picture>
-</a>
-
-## License
-
-The studio is MIT, and so are acestep.cpp and ACE-Step 1.5 with its models. mdmachine's
-Regrind fine-tune and its VAE decoders are CC BY-NC-SA 4.0 — songs made with them are for
-non-commercial use. The LoRA in the catalogue carry their authors' licences, shown on each
-card's page. MuScriptor's weights, used for MIDI, are CC BY-NC 4.0.
-
-One bundled component is under a different licence: the visualiser's spectrum looks come from
-[audioMotion-analyzer](https://github.com/hvianna/audioMotion-analyzer), which is **AGPL-3.0**;
-its source, like the studio's, is public.
-
-What changed and when is in [CHANGELOG.md](CHANGELOG.md).
+Without Docker, the server script falls back to a host `cargo build`. That only produces something the pod can run when the host is a compatible Linux x86-64.

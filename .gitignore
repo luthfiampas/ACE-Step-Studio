@@ -26,5 +26,6 @@ NEXT_SESSION_PROMPT.md
 
 # Local editor and agent settings.
 .claude/
+.private/
 desktop/src-tauri/tauri.release.conf.json
 *.password

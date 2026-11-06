@@ -42,8 +42,8 @@ interface SeparationStatus {
   card_runtime_installed: boolean;
   card_missing_bytes: number;
   /** The separator: HT-Demucs for six stems, Mel-Band RoFormer for the vocals and the instrumental. */
-  engine?: 'htdemucs' | 'roformer';
-  settings: { stems: string[]; overlap: number; runtime: 'auto' | 'cuda' | 'cpu'; engine?: 'htdemucs' | 'roformer' };
+  engine?: 'htdemucs' | 'roformer' | 'roformer-sw';
+  settings: { stems: string[]; overlap: number; runtime: 'auto' | 'cuda' | 'cpu'; engine?: 'htdemucs' | 'roformer' | 'roformer-sw' };
   run: { song_id: string; progress: number; done: boolean; error: string | null; stems: string[] } | null;
 }
 
@@ -225,7 +225,7 @@ export function StudioToolsPanel({ initialSongId }: { initialSongId?: string | n
           <div className="flex items-center gap-2 text-sm font-semibold text-zinc-900 dark:text-white">
             <Scissors size={17} className="text-pink-500" /> {t('stemsTitle')}
           </div>
-          <p className="mt-2 text-sm text-zinc-600 dark:text-zinc-300">{status?.engine === 'roformer' ? t('stemsHintRoformer' as never) : t('stemsHint')}</p>
+          <p className="mt-2 text-sm text-zinc-600 dark:text-zinc-300">{status?.engine === 'roformer' ? t('stemsHintRoformer' as never) : status?.engine === 'roformer-sw' ? t('stemsHintRoformerSw' as never) : t('stemsHint')}</p>
 
           {/* A track is picked from a list, not from a native dropdown: a
               generated title can be a whole paragraph, and an <option> shows
@@ -307,7 +307,7 @@ export function StudioToolsPanel({ initialSongId }: { initialSongId?: string | n
               {/* Where a capability is installed is one place: the models
                   panel. This tool used to install the card runtime itself, with
                   its own button and its own progress, and disagree with it. */}
-              {status?.card && !status?.card_runtime_installed && status?.engine !== 'roformer' && (
+              {status?.card && !status?.card_runtime_installed && status?.engine === 'htdemucs' && (
                 <p className="mt-2 text-[11px] leading-4 text-amber-600 dark:text-amber-300">
                   {t('separationInstallGpu')}
                   {status?.card_missing_bytes ? ` · ${megabytes(status.card_missing_bytes)}` : ''}
@@ -315,7 +315,7 @@ export function StudioToolsPanel({ initialSongId }: { initialSongId?: string | n
               )}
             </div>
 
-            {status?.engine !== 'roformer' && <div className="mt-3">
+            {status?.engine === 'htdemucs' && <div className="mt-3">
               <p className="text-[11px] font-bold uppercase tracking-wide text-zinc-500">{t('separationQuality')}</p>
               <div className="mt-2 flex gap-2">
                 {QUALITIES.map(quality => (
